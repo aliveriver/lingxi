@@ -16,6 +16,18 @@ def _json(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, default=str))
 
 
+def _read_diagnostic_json(path: Path):
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+
+
 def _vector(text: str, count: int) -> tuple[float, ...]:
     values = tuple(float(value.strip()) for value in text.split(",") if value.strip())
     if len(values) != count:
@@ -31,6 +43,44 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="Show connection and capability status")
     analyze = sub.add_parser("analyze-log", help="Analyze existing acceptance stdout without connecting to ROS")
     analyze.add_argument("path", type=Path)
+    acceptance = sub.add_parser("acceptance-report", help="Offline fixed-baseline motion verdicts; never grants execution")
+    acceptance.add_argument("traces", nargs="+", type=Path)
+    acceptance.add_argument("--criteria", type=Path, help="Explicit engineering criteria JSON; defaults are not manufacturer limits")
+    inspect = sub.add_parser("inspect-recording", help="Validate and summarize an observation JSONL offline")
+    inspect.add_argument("path", type=Path)
+    replay = sub.add_parser("replay", help="Replay observations to stdout only; never command a robot")
+    replay.add_argument("path", type=Path)
+    replay.add_argument("--speed", type=float, help="Optional paced replay multiplier; default reads immediately")
+    replay.add_argument("--require-images", action="store_true")
+    shadow = sub.add_parser("shadow-replay", help="Run a Python policy on a recording with zero actuation")
+    shadow.add_argument("path", type=Path)
+    shadow.add_argument("output", type=Path)
+    shadow.add_argument("--policy", help="Trusted installed module:factory; default observes without proposing motion")
+    shadow.add_argument("--max-steps", type=int, default=1000)
+    shadow.add_argument("--deadline", type=float, default=1.)
+    shadow.add_argument("--require-images", action="store_true")
+    gravity = sub.add_parser("gravity-report", help="Offline URDF gravity report; never connects to ROS")
+    gravity.add_argument("--urdf", type=Path, required=True)
+    gravity.add_argument("--input", type=Path, required=True, help="Explicit pose, torso gravity and payload JSON")
+    for name, help_text in (
+        ("plan-compensation", "Offline quintic/bounded gravity-bias plan; no ROS connection"),
+        ("mock-compensation", "Execute declared compensation scenario on an isolated mock backend"),
+    ):
+        compensation = sub.add_parser(name, help=help_text)
+        compensation.add_argument("--urdf", type=Path, required=True)
+        compensation.add_argument("--input", type=Path, required=True)
+        compensation.add_argument("--output", type=Path, required=True, help="New plan JSON / mock journal JSONL")
+    compensation_replay = sub.add_parser("replay-compensation", help="Verify and replay saved plan to stdout; no actuation")
+    compensation_replay.add_argument("path", type=Path)
+    compensation_replay.add_argument("--urdf", type=Path, help="Relocated copy of the exact model used for the plan")
+    compensation_replay.add_argument("--speed", type=float, help="Optional pacing multiplier; default reads immediately")
+    comparison = sub.add_parser("compare-arm-models", help="Offline seven-link arm URDF parameter comparison")
+    comparison.add_argument("reference", type=Path)
+    comparison.add_argument("candidate", type=Path)
+    observation = sub.add_parser("analyze-gravity-state", help="Offline IMU/waist snapshot validation")
+    observation.add_argument("snapshot", type=Path)
+    observation.add_argument("--mounting", type=Path, required=True)
+    observation.add_argument("--urdf", type=Path, help="Required for a pelvis IMU's waist chain")
     doctor = sub.add_parser("doctor", help="Run non-mutating interface checks")
     doctor.add_argument("--sample", action="store_true", help="Wait for live state and camera samples")
 
@@ -110,6 +160,108 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command in {"plan-compensation", "mock-compensation", "replay-compensation"}:
+        from .compensation import CompensationRequest, plan_compensated_joint_session
+        from .errors import X2Error
+        from .replay import strict_json
+        import xml.etree.ElementTree as ET
+
+        try:
+            if args.command == "replay-compensation":
+                from .compensation import replay_compensation_plan
+                for frame in replay_compensation_plan(args.path, urdf=args.urdf, speed=args.speed):
+                    print(json.dumps(frame, ensure_ascii=False, allow_nan=False))
+                return 0
+            request = strict_json(args.input.read_text(encoding="utf-8"))
+            if args.command == "plan-compensation":
+                plan = plan_compensated_joint_session(args.urdf, request)
+                with args.output.open("x", encoding="utf-8") as output:
+                    json.dump(plan, output, ensure_ascii=False, allow_nan=False, indent=2)
+                _json({k: v for k, v in plan.items() if k != "frames"})
+            else:
+                from .backends.mock import MockBackend
+                from .config import load_config
+                from .models import ARM_JOINT_NAMES
+                config = load_config(args.config)
+                if config.backend != "mock":
+                    raise ValueError("mock-compensation requires an explicit backend: mock config")
+                req = CompensationRequest.model_validate(request)
+                backend = MockBackend(config, initial_arm_positions=tuple(req.baseline_rad[n] for n in ARM_JOINT_NAMES))
+                with X2Client(config, backend=backend) as client:
+                    _json(client.run_mock_compensated_session(args.urdf, request, journal=args.output))
+            return 0
+        except (OSError, ValueError, TypeError, KeyError, X2Error, ET.ParseError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+    if args.command == "acceptance-report":
+        from .acceptance_report import AcceptanceCriteria, evaluate_file, evaluate_repeatability
+        from .replay import strict_json
+        try:
+            criteria = AcceptanceCriteria(**strict_json(args.criteria.read_text())) if args.criteria else AcceptanceCriteria()
+            reports = [evaluate_file(path, criteria) for path in args.traces]
+            repetition = evaluate_repeatability(reports, criteria)
+            _json({"kind": "acceptance_review", "sessions": reports, "repeatability": repetition,
+                   "execution_authorized": False, "hardware_acceptance_complete": False})
+            # A successful analysis with failed/incomplete evidence is not a green exit.
+            return 0 if repetition["verdict"] == "pass_under_criteria" else 3
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+    if args.command in {"inspect-recording", "replay", "shadow-replay"}:
+        from .replay import RecordingReader, inspect_recording
+
+        try:
+            if args.command == "inspect-recording":
+                _json(inspect_recording(args.path))
+            elif args.command == "replay":
+                reader = RecordingReader(args.path, require_images=args.require_images)
+                samples = reader if args.speed is None else reader.playback(args.speed)
+                for sample in samples:
+                    print(json.dumps({"index": sample.index, "execution": "none",
+                                      "observation": observation_to_dict(sample.observation, False),
+                                      "omitted_images": [c.value for c in sample.omitted_images],
+                                      "camera_metadata": sample.camera_metadata}, allow_nan=False))
+            else:
+                from .experiments import PolicyAction
+                from .shadow import ShadowExperimentRunner
+                class ObservePolicy:
+                    def reset(self): pass
+                    def act(self, observation): return PolicyAction()
+                policy = ObservePolicy()
+                if args.policy:
+                    import importlib
+                    module, separator, factory = args.policy.partition(":")
+                    if not separator or not module or not factory:
+                        raise ValueError("--policy must be module:factory")
+                    policy = getattr(importlib.import_module(module), factory)()
+                reader = RecordingReader(args.path, require_images=args.require_images)
+                _json(ShadowExperimentRunner(policy).run(
+                    (s.observation for s in reader), args.output, max_steps=args.max_steps,
+                    inference_deadline_s=args.deadline, source=f"recording:{args.path}"))
+            return 0
+        except (OSError, ValueError, TypeError, ImportError, AttributeError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+    if args.command in {"gravity-report", "compare-arm-models", "analyze-gravity-state"}:
+        from .gravity import gravity_report
+        import xml.etree.ElementTree as ET
+
+        try:
+            if args.command == "gravity-report":
+                _json(gravity_report(args.urdf, _read_diagnostic_json(args.input)))
+            elif args.command == "compare-arm-models":
+                from .model_audit import compare_arm_models
+                _json(compare_arm_models(args.reference, args.candidate))
+            else:
+                from .gravity_observation import analyze_gravity_observation
+                result = analyze_gravity_observation(_read_diagnostic_json(args.snapshot),
+                                                     _read_diagnostic_json(args.mounting), urdf=args.urdf)
+                _json(result)
+                return 0 if result["usable_for_offline_estimate"] else 2
+            return 0
+        except (OSError, ValueError, KeyError, TypeError, ET.ParseError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     if args.command == "analyze-log":
         from .log_analysis import analyze_session, read_session
 

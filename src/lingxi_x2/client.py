@@ -123,7 +123,10 @@ class X2Client(AbstractContextManager["X2Client"]):
         deadline = time.monotonic()
         while self._started:
             yield self.observe(cameras, include_tactile, max(1.0, period * 2))
-            deadline += period
+            deadline = max(deadline + period, time.monotonic())
+            # A slow consumer must not trigger a burst of backlogged observations.
+            if deadline <= time.monotonic():
+                deadline = time.monotonic() + period
             time.sleep(max(0.0, deadline - time.monotonic()))
 
     @staticmethod
@@ -142,6 +145,11 @@ class X2Client(AbstractContextManager["X2Client"]):
         for step in range(1, steps + 1):
             alpha = step / steps
             yield tuple(start + (goal - start) * alpha for start, goal in zip(current, target, strict=True))
+
+    def run_mock_compensated_session(self, urdf, request: dict, *, journal) -> dict:
+        """Execute a fully prevalidated scenario on an actual MockBackend only."""
+        from .compensation_runner import execute_mock_compensated_session
+        return execute_mock_compensated_session(self, urdf, request, journal)
 
     def move_arm(self, command: ArmCommand, *, confirm_hardware: bool = False, hold_duration_s: float = 0.0) -> dict[str, object]:
         self._require_confirmation(confirm_hardware)

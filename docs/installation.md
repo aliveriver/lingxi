@@ -23,7 +23,9 @@ cp config/x2.example.yaml config/x2.yaml
 uv run x2 --config config/x2.yaml status
 ```
 
-CLI 会检测 `/agibot/software/common` 并把其 ament、Python、动态库路径加入环境后自重启一次。这保证加载的是当前固件附带的消息包。
+CLI 会检测 `/agibot/software/common`，加入已安装的 `/opt/ros/humble` 基础运行时路径，再将固件 AimDK 的 ament、Python 和动态库路径置于最前，并自重启一次。只加入实际存在的 Python 3.10 路径，不执行 shell 启动脚本。没有 AimDK 安装的开发机不会因此加载系统 ROS。
+
+2026-09-29 在新的非交互 SSH 会话中发现旧版只添加 AimDK 路径、未加载 ROS 基础环境，导致运行时导入失败。修复已部署，PC2 在未手动 source 的新会话中完成 RGB/关节/触觉采集验证。仍使用旧版时可先运行 `source /opt/ros/humble/setup.bash`，再启动 CLI；无需改 MC 或机器人配置。
 
 不要在 PC1 (`10.0.1.40`) 安装或运行项目。外部开发机应使用 Ubuntu 22.04、ROS 2 Humble 和与机器人固件严格对应的 SDK；官方建议有线直连，开发机静态 IP `10.0.1.2/24`，PC2 为 `10.0.1.41`。
 

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .client import X2Client
+from .errors import SafetyInterlockError
 from .models import ArmCommand, CameraName, HandCommand, Observation
 
 
@@ -34,6 +35,13 @@ class ExperimentRunner:
         include_tactile: bool = True,
         allow_hardware_actions: bool = False,
     ) -> int:
+        if type(max_steps) is not int or max_steps <= 0:
+            raise ValueError("max_steps must be a positive integer")
+        if self.client.status().backend != "mock":
+            raise SafetyInterlockError(
+                "Hardware model action loops remain disabled until following/return, repeatability, "
+                "multi-axis and hand/contact acceptance pass; use ShadowExperimentRunner"
+            )
         self.policy.reset()
         for step in range(max_steps):
             observation = self.client.observe(cameras, include_tactile)

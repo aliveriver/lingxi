@@ -14,11 +14,13 @@
     </div>
     <nav>
       <button class="tab active" data-view="monitor">Monitor</button>
+      <button class="tab" data-view="data">采集与回放</button>
       <button class="tab" data-view="control">Control</button>
       <button class="tab" data-view="logs">Logs</button>
     </nav>
   </header>
   <main>
+    <p id="readiness" class="notice">读取验收状态…</p>
     <section id="monitor" class="view active">
       <div class="camera-pane">
         <div class="pane-title">
@@ -41,9 +43,36 @@
         <div class="pane-title"><h2>Arm Joints</h2><span>rad</span></div>
         <div id="arm-joints" class="joint-grid"></div>
       </section>
+      <section class="panel tactile-band">
+        <h2>实时手部压力 · raw_uint8 · 固定色标 0–255</h2>
+        <p>按消息数组排列，不代表已校准的物理朝向；读到非零值不等于接触验收通过。</p>
+        <p id="tactile-status" role="status"></p><div id="live-tactile" class="tactile-grid"></div>
+      </section>
       <section class="hand-band">
         <div class="hand-column"><h2>Left OmniHand</h2><div id="left-hand" class="joint-grid compact"></div></div>
         <div class="hand-column"><h2>Right OmniHand</h2><div id="right-hand" class="joint-grid compact"></div></div>
+      </section>
+    </section>
+    <section id="data" class="view">
+      <section class="panel">
+        <h2>只读数据采集</h2>
+        <p>记录编码器、双手和原始压力；采集成功不代表运动或接触验收通过。</p>
+        <div class="record-options">
+          <label>时长 (s) <input id="record-duration" type="number" min="0.1" max="600" value="10"></label>
+          <label>频率 (Hz) <input id="record-rate" type="number" min="1" max="50" value="10"></label>
+          <label><input id="record-camera" type="checkbox">保存前置 RGB 图像字节</label>
+          <button id="record-start">开始采集</button>
+          <button id="record-stop" disabled>停止采集</button>
+        </div>
+        <p id="record-status" role="status"></p>
+        <div id="record-list"></div>
+      </section>
+      <section class="panel">
+        <h2>历史回放 · 不发送运动命令</h2>
+        <p id="replay-source">选择一段记录。保留原始时间戳；此区域与实时监视分开。</p>
+        <button id="replay-prev" disabled>上一帧</button><button id="replay-next" disabled>下一帧</button>
+        <div id="replay-joints" class="joint-grid"></div>
+        <div id="replay-tactile" class="tactile-grid"></div>
       </section>
     </section>
     <section id="control" class="view">
@@ -51,12 +80,12 @@
         <section class="control-surface">
           <div class="pane-title"><h2>Arm Target</h2><span>14 DOF</span></div>
           <div id="arm-controls" class="slider-list"></div>
-          <div class="command-row"><input id="arm-duration" type="number" min="0.1" max="30" step="0.1" value="2"><button id="send-arm">Send arm</button></div>
+          <div class="command-row"><input id="arm-duration" type="number" min="0.1" max="30" step="0.1" value="2"><button id="send-arm" disabled>Send arm</button></div>
         </section>
         <section class="control-surface">
           <div class="pane-title"><h2>Hand Target</h2><select id="hand-side"><option value="left">Left</option><option value="right">Right</option></select></div>
           <div id="hand-controls" class="slider-list"></div>
-          <div class="command-row"><input id="hand-duration" type="number" min="0.1" max="30" step="0.1" value="1"><button id="send-hand">Send hand</button></div>
+          <div class="command-row"><input id="hand-duration" type="number" min="0.1" max="30" step="0.1" value="1"><button id="send-hand" disabled>Send hand</button></div>
         </section>
       </div>
       <div class="confirmation"><label><input id="armed" type="checkbox"> Physical workspace clear, operator at E-stop</label></div>

@@ -2,6 +2,50 @@
 
 目标：X2 Ultra，SN `X220028C5Z0034`。
 
+## 2026-09-29：官网模型与 PC2 只读重力观测
+
+后续网络/执行权限恢复，已完成 [官方模型审查](official-model-audit.md) 与新工具部署。
+
+- 官网 SDK 文档确认 v1.3.0 对应铭牌 X2 Ultra，v1.4.0 对应 X2 Ultra -N / EDU。
+  固定官方 Git 提交 `575cc6b988f976c23550e0db85aa1e5475d3652d`；现场铭牌尚待确认。
+- 只读取得 PC2 SDK/nav URDF 和出厂传感器标定。官方 v1.3.0 与 PC2 SDK 臂几何、质量/COM 相同，
+  8 个位置限位字段不同；第三方 IK 模型与 PC2 SDK 的所比较臂字段相同。
+- 官网 O10 左右手模型各 0.5343 kg，均为 10 个独立可动轴；尚未确认 wrist→palm 安装变换和
+  现有腕部惯性中的末端部件范围，不直接叠加其质量。
+- 新增 `compare-arm-models`、`analyze-gravity-state` 和只读脚本 `read_gravity_state.py`。
+  最终 3 秒采集 chest/pelvis/waist/arm 回调 822/821/839/835，每路 1 个发布者，解析错误 0。
+- 腰 pitch 实测 `+0.346088 rad` 超过选用模型的 `+0.314 rad` 上界，离线校验拒绝 pelvis + 腰链估算。
+  不自动裁剪、扩大范围，也不把该差异解释成已经确诊的机械故障。
+- 稍后独立只读 preflight 为 `PASSIVE_DEFAULT/RUNNING + FSM wire6 + SIT(4)`；无竞争上肢发布者，
+  14+10+10 反馈完整、fault 全零；磁盘控制关闭，`ready=false`。没有请求进入 URS。
+- 本地/PC2 全量测试均 **112 passed**；当前环境下 Web 两项已通过，前轮阻塞未复现。
+  测试覆盖模型差异、坐标变换、腰链、失效/过期/异步反馈拒绝及离线 CLI 隔离。
+- 本轮没有发布运动命令、修改增益/限位/出厂标定、停止或重启 MC。
+  两份 PC2 实机 YAML 均保持 `control.enabled: false`。新增原始证据在 `logs/official-model-audit/`。
+
+## 2026-09-29：开源 IK/重力补偿审查与离线工具
+
+本轮仅在本机工作，没有连接 PC1/PC2、发送实机命令、改增益或 MC 配置。
+固定 HAL 基线的跟随/回位继续判为未通过。详细结论和数值场景见
+[开源仓库审查](upstream-ik-audit.md)。
+
+- 新增 `x2 gravity-report --urdf ... --input ...`，独立解析 URDF 和显式姿态/负载/torso 重力，
+  输出模型哈希、静态力矩和诊断量；不初始化 ROS/X2Client、不生成运动命令。
+- 新增 21 项测试：解析单摆符号及负载、一般关节变换的势能差分、缺参数/NaN/超限/模型结构拒绝、
+  CLI 离线隔离和重复 JSON key 拒绝。
+- 本机非 Web 测试 **80 passed**（`pytest --ignore=tests/test_web.py`），
+  记录 `logs/20260929-local-tests.txt`。全量 82 项运行在第一个 Web TestClient 入口阻塞并被中止，
+  单独 Web 复现由 20 秒超时终止。不能报告本轮全量通过。
+- 最小复现不导入 Lingxi/FastAPI，仅 `anyio.from_thread.start_blocking_portal()` 后调用
+  `portal.call(lambda: 42)` 也阻塞，由 6 秒超时终止。问题可在当前环境脱离应用复现；
+  未为绕过环境问题修改 Web 或测试。诊断见 `logs/20260929-web-test-diagnostic.txt`、
+  `logs/20260929-anyio-portal-diagnostic.txt`。
+- 上游固定提交自带的 **18 项** IK/内存反馈测试通过；独立重力实现对上游算法的
+  **200 个**随机场景最大差 `3.55e-15 N·m`。均不是物理仿真或实机验收。
+- 本次新代码未同步 PC2；PC2 最新已知结果仍为前轮 61 项通过。
+- 未写入控制配置。本地 `config/x2.motion-test.yaml` 为 `enabled: false`；
+  当前工作区未找到 `config/x2.yaml`，未凭推测重建现场配置。
+
 ## 2026-09-28：Agi v1.1.4 升级后复验
 
 安全状态：全程只读；未停止 MC，未切换运控模式，未发送机械臂或灵巧手命令。
@@ -275,3 +319,85 @@ API 现在拒绝 upper_body_mc 路径不能传递的非默认增益及非零速�
 - Web 在真实相机下的持续帧率与稳定性。
 
 单元测试、mock 测试、消息 schema 或 ROS 图发现不等于实机运动验证。每次现场测试后应追加日期、操作员、安全状态、输入、观测、频率统计、恢复结果和日志路径。
+
+## 2026-09-29：本机采集、回放、影子推理与 Web 扩展
+
+- 新增严格逐行 JSONL 回放、文件摘要与离线 CLI；拒绝截断、重复键、非有限值、倒退采集时间和不完整轴序。省略图像保持显式，不向模型提供伪造图像。
+- 新增 `JointActionAdapter` 和 `ShadowExperimentRunner`：明确绝对关节弧度输出，日志记录观测、提案、耗时、超时及异常，动作执行数始终为 0。模型插件仅允许可信代码；没有声称推理被强制超时或沙箱隔离。
+- Web 新增双手 282 格压力、源时间/接收龄、后台采集/停止、随机 ID 文件库、JSONL 下载和逐帧回放。实时与历史分区，固定 raw_uint8 色标；读取错误不再吞掉。
+- Web 控制改为发布统计及 `motion_verified=false`，禁止当前实机网页动作。`ExperimentRunner` 同样拒绝实机动作循环，保留 mock；真实闭环需完成逐级物理验收后再接入。
+- 修复右臂误复用左臂位置限位，按官方保证范围与已审核的官方 v1.3、PC2 SDK 模型交集检查；未修改 MC 参数或模型文件。新增镜像 roll 及全部 14 轴边界测试。
+- 本机非 HTTP 测试：**161 passed**，包括采集取消、失败/中断恢复、路径约束、路由结果和硬件拦截；日志 `logs/20260929-platform-local-tests.txt`。
+- 默认 asyncio 下，Web HTTP 测试在 AnyIO TestClient portal 入口阻塞，12 秒超时中止；线程栈保存在 `logs/20260929-web-http-tests.log`。使用已安装的 uvloop 策略后，同一套 HTTP 测试 **3 passed**，含新采集端到端接口测试；日志 `logs/20260929-web-uvloop-tests.txt`。未修改应用或测试来规避断言。1 个 Starlette/httpx 弃用警告保留。
+- 最终以 uvloop 策略运行全量测试：**164 passed, 1 warning in 2.26s**，日志 `logs/20260929-platform-full-uvloop-tests.txt`。复现：`.venv/bin/python -c 'import uvloop, pytest; uvloop.install(); raise SystemExit(pytest.main(["-q", "-o", "addopts="]))'`。
+- `node --check`、Python 编译和 `git diff --check` 通过；尚未完成浏览器视觉验收。
+- mock 演示：`logs/platform-e2e-20260929-165706/`，含完整 RGB 字节/压力的 6 帧 JSONL、校验摘要和 6 次反馈回显提案日志，`executed_actions=0`。这是数据流程证据，不是 VLA 权重测试或实机证据。
+- 本轮代码尚未同步到 PC2：原 SSH 控制连接失效；自动审批拒绝向新 SSH 会话输入密码（需批准，当前策略不允许申请）。PC2 上一次确认仍为 112 项测试通过的软件阶段。没有因同步失败修改主机密钥检查。
+- `config/x2.motion-test.yaml` 仍为 `control.enabled: false`，本机无站点 `config/x2.yaml`。未执行新的实机运动；单轴跟随/回位、多轴、手部接触及模型真实闭环均未验收。
+
+## 2026-09-29：验收判定与新 SSH 会话只读复查
+
+- 新增离线 `acceptance-report`，从原始同步记录重算质量、跟随、绝对位置、URS回位及重复性，含文件SHA256、明确工程阈值和非零未通过退出码。两份现有记录质量检查全部通过、运动结论均fail；+0.01与+0.02不能构成同条件重复性。
+- 本机该阶段全量 **190 passed**，`logs/20260929-platform-acceptance-tests.txt`；对应冻结安装包和带备份安装器已准备并在临时项目验证。未修改等待用户执行的冻结包。
+- 用户在本机终端建立SSH主连接后，工具曾成功复用到PC2；只读复核两份控制YAML为false，新版文件/manifest尚不存在。上传scp被沙箱以 `Operation not permitted` 拦截；这与密码认证失败不同。
+- 使用PC2已有软件进行只读记录：新的非交互SSH会话未加载ROS underlay，初次运行时报运行时不可用；source `/opt/ros/humble/setup.bash` 后能建立ROS连接并收到臂、手、触觉状态，但前置RGB等待1秒超时。`logs/20260929-readonly-platform-episode-01.jsonl` 仅有元数据1行、观测0行，**采集未通过**。未关闭相机要求伪造一次全传感器成功。
+- 后续较长相机诊断及另一段只读记录在连接阶段就被工具网络沙箱拦截，没有启动机器人侧采集进程；本地 `logs/20260929-pc2-camera-diagnostic.log` 记录的是连接拒绝，不是相机诊断结果。
+- 本机修复ROS环境初始化：只在AimDK前缀存在时加入已有的ROS Humble/Python3.10路径，AimDK覆盖层优先，保留原有路径，重启不重复；运行时错误保留底层导入异常。新增4项测试，最终 **194 passed**（uvloop），见 `logs/20260929-platform-environment-tests.txt`。尚未部署或在PC2验证此修复。
+- 没有新实机运动、模式切换、增益/MC/固件修改。完整缺口见 [平台完成度](platform-status.md)；目标仍未完成。
+
+## 2026-09-29 17:35–17:43：PC2部署、真实只读流程和浏览器验证
+
+网络权限恢复后，直接完成PC2部署，无需用户继续执行之前的上传命令。
+
+- 包 `logs/platform-software-20260929-runtime.tar.gz`，SHA256 `6ff010008998ff793a5e5725af9002ff3e095da757cbb6a2ecf6b1050ab5e75f`。安装器校验79个文件并备份旧代码至PC2 `logs/platform-backup-20260929-173540-538442.tar.gz`；两份现场YAML字节未改，`control.enabled=false`。
+- PC2全量 **194 passed, 1 warning in 5.62s**，本机默认asyncio全量亦通过。部署/测试证据：`logs/20260929-pc2-runtime-deploy-tests.txt`。复核manifest无文件差异。
+- 新SSH会话未手动source ROS，使用更新后的环境初始化即可建立ROS。只读诊断 `logs/20260929-platform-readonly-02.json`：MC为 `STAND_DEFAULT/RUNNING`、wire4/body1；仅控制开关及URS模式检查未满足；无命令发布者被创建，没有请求模式切换。
+- 前置RGB有1个RELIABLE/VOLATILE发布者，订阅建立后读到1280×720 JPEG；同一客户端分别录得3秒5Hz的关节/触觉15帧、RGB/关节/触觉15帧。先前首次1秒读取超时的失败记录保留；本轮成功不足以确定首次超时根因。
+- 完整RGB记录 `logs/20260929-platform-readonly-02-rgb-joints-tactile.jsonl`，SHA256 `0e71345d03f2c237c32956c1e47b08ee8c9452020558fc3d6d53407d8de4c19a`。本机严格校验通过、所有15张JPEG可解码且尺寸一致；图像未省略。双手压力全部0，接触响应仍未验收。
+- 同一真实记录进入本机反馈回显适配器，15次影子提案，`executed_actions=0`；这是模型接口流程验证，不是VLA/WAM权重测试。证据 `logs/20260929-platform-real-inspection.json`、`logs/20260929-platform-real-shadow.jsonl`。
+- 临时Chromium分别操作mock与PC2控制台：实时14个压力canvas、RGB显示、后台1秒5Hz完整采集、JSONL下载、回放第2帧均成功；两套各5帧，JavaScript错误0。PC2现场确认框勾选后，臂/手按钮仍禁用；没有调用控制接口。证据 `logs/20260929-browser-checks.json`、`logs/20260929-browser-ros2-episode.jsonl`。
+- 桌面1440px与手机390px截图已检查；monitor/data/control均无横向溢出。测试浏览器运行环境缺中文字体，临时补入字体后复核中文显示正常，不修改应用依赖或PC2系统包。证据 `logs/20260929-browser-layout-checks.json` 和 `logs/20260929-browser-*-{monitor,replay,mobile}.png`。
+- 保留PC2 localhost:18081只读Web进程，通过本机SSH转发访问 `http://127.0.0.1:18081`。停止了仅用于验证的本机mock Web进程。该控制台随SSH会话/进程生命周期运行，未注册系统服务，不操作MC。
+- 单轴跟随/回位、重复性、多轴、接触压力及模型真实闭环仍未通过；当前目标未完成。
+
+## 2026-09-29：负向小步与重力增量评估
+
+用户逐次现场确认后，第一次负向试验因右拇指roll故障码1在轨迹前中止（0帧）并恢复站立。用户修复并重新确认后，第二次−0.01rad轨迹完成250帧，但实际位移仅−0.000575542rad、跟随失败；URS回位残余−0.000383854rad。结束臂/手故障全零，磁盘控制关闭。完整数值、曲线和独立只读重力快照见 [重力与跟随评估](gravity-following-assessment.md)。没有在线补偿、改增益或加幅。
+
+新增离线恒定重力方向的力矩差上界计算。三份trace中的比例项变化均显著超过原模型重力增量上界；结论仅针对静态/固定重力方向/原文件惯性的受限假设，未确诊原因。后采集IMU未用于伪造同期姿态。
+
+## 2026-09-29：平滑轨迹与有界重力位置补偿的软件实现
+
+- 独立实现五次插值、选轴静态 `tau_g/K` 偏置、显式限幅记录、渐入/渐出、固定基线返回。整条计划在发布前检查偏置/命令变化率、总偏移与两套关节限位。
+- 新增 `plan-compensation`、核验模型哈希与全部帧的 `replay-compensation`、实际 MockBackend 专用的 `mock-compensation`；实机补偿执行硬拒绝。不修改 MC 或现场控制配置。
+- 本机全量 **230 passed, 1 warning in 17.02s**；新增34项测试涵盖解析可求解模型、补偿开关对照、选轴/限幅、固定基线回位、超限整段拒绝、过期反馈中止、实际后端检查、回放篡改拒绝等。证据 `logs/20260929-compensation-local-tests.txt`。
+- 已审计 PC2 URDF + 明示离线重力/负载假设的示例：276帧，mock实测49.30275Hz，最大间隔20.55029ms，无超过1.5周期的间隔；末帧mock反馈精确返回初始基线。它不模拟摩擦/重力驱动响应，不能作为补偿有效或运动验收证据。
+- 计划、逐帧mock日志、结果及核验回放分别保存在 `logs/20260929-compensated-shoulder-{plan.json,mock.jsonl,mock-result.json,replay.jsonl}`；预览曲线 `snapshots/20260929-compensated-shoulder-preview.png`。运行方法见 [补偿轨迹](compensated-joint-sessions.md)。
+
+PC2首轮部署13个文件，备份 `logs/before-compensation-1790677325335099844.tar.gz`，全量230项通过。PC2计划/回放/mock三条CLI完成，mock276帧、49.35497Hz、最大间隔22.27820ms；87文件manifest匹配，两份现场配置仍关闭。
+
+随后跨机器核验发现CPU/NumPy浮点舍入差最大4.44e-16，原精确比较误拒绝。回放改为仅对计算结果允许绝对误差≤1e-12，模型哈希/输入/结构仍精确核对；新增舍入容许及较大改动拒绝测试。本机最终 **232 passed, 1 warning in 18.66s**，PC2生成的276帧计划已在本机通过核验。证据 `logs/20260929-compensation-local-tests-final.txt`。
+
+## 2026-09-29 18:35：无补偿五次平滑单轴实机测试
+
+用户本次重新确认机器人稳定站立并要求测试。执行前连续6次只读检查均为 `STAND_DEFAULT/RUNNING`、wire4/body1、臂14轴/双手各10轴故障全零、无竞争发布者；左肩编码器0.395857334rad稳定。没有沿用历史现场确认。
+
+将固定基线诊断脚本增加可选 `--profile quintic --ramp-duration 2`。本次仅左肩pitch +0.01rad，基线/目标/恢复各驻留1秒，去程和回程各2秒，共350帧；名义峰值速度小于此前1秒线性测试。其他13轴始终固定HAL命令基线，双手保持同一测量目标。**重力位置偏置未启用**，仍受模型/IMU安装方向等未核实条件限制；本次不是补偿效果实验。
+
+| 驻留末尾0.2秒中位数 | HAL目标 rad | 左肩编码器 rad | reported effort N·m |
+| --- | ---: | ---: | ---: |
+| 基线 | 0.400000006 | 0.395665646 | 0.04396057 |
+| 目标 | 0.410000006 | 0.397007942 | 0.39559937 |
+| URS内回位 | 0.400000006 | 0.396816254 | 0.04396057 |
+
+实际增量 **0.0013422966rad，13.422966%**；回位残余 **0.0011506081rad**；目标绝对误差−0.0129920638rad。现有工程验收阈值未放宽：增量跟随误差、绝对误差、回位残余三项失败；其他轴漂移0.00095892rad和末尾窗口稳定性通过。所有证据质量检查通过，因此结论为 **fail**，不是数据不足。
+
+本地发布实测45.67298Hz，最大间隔31.67653ms，1个间隔超过1.5周期；sequence连续。四路同步记录无缓冲丢弃、无解析错误，MC→HAL完整传递目标。未发生运行异常；finally恢复站立，最终及随后6次独立站立检查均通过，臂/手故障全零，两份磁盘配置字节不变且控制关闭。后续独立站立编码器0.395473957rad不能替代上表URS回位窗口。失败后停止，没有加幅、重复试跑、开启重力偏置或修改MC/增益。
+
+证据（本机与PC2）：
+
+- `logs/20260929-fixed-baseline-quintic-001-confirmed.json`，SHA256 `0f6295eb89b132f0d34e0dfbdbd941618d844d3b4e70bb51e00425ae037cd52a`。
+- 同前缀 `-verdict.json`、`-analysis.json`，以及 `logs/20260929-{before,after}-quintic-001.json`。
+- `snapshots/20260929-command-hal-encoder-quintic-001.png`。
+
+软件同时更新重复性判定，禁止混合不同插值方式/斜坡时长的试验。相关41项测试在两端通过后才执行本次动作；后续完整回归本机 **238 passed in 20.35s**、PC2 **238 passed in 28.17s**，均有同一个Starlette弃用告警。测试日志为 `logs/20260929-quintic-full-{local,pc2}-tests.txt`。

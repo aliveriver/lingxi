@@ -39,6 +39,7 @@ class ControlConfig(BaseModel):
 
 class WebConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    recordings_dir: str = "recordings/web"
     host: str = "127.0.0.1"
     port: int = Field(default=8080, ge=1, le=65535)
 

@@ -41,7 +41,7 @@ def test_read_only_preflight_reports_disabled_without_writing() -> None:
 
 
 def test_mock_arm_and_hand_trajectory(client: X2Client) -> None:
-    arm_target = [-0.1, 0.1, 0.0, -0.2, 0.0, 0.0, 0.0] * 2
+    arm_target = [-0.1, 0.1, 0.0, -0.2, 0.0, 0.0, 0.0] + [-0.1, -0.1, 0.0, -0.2, 0.0, 0.0, 0.0]
     client.move_arm(ArmCommand.from_positions(arm_target, 0.01), confirm_hardware=True)
     client.move_hand(HandCommand.from_positions("right", [0.2] * 10, 0.01), confirm_hardware=True)
     assert [joint.position_rad for joint in client.arm_state().joints] == pytest.approx(arm_target)

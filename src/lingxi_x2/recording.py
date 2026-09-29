@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import asdict
 import base64
 import json
+import math
 from pathlib import Path
 import time
+import threading
 from typing import Any
 
 from .client import X2Client
@@ -41,10 +43,14 @@ class JsonlRecorder:
         cameras: tuple[CameraName | str, ...] = (),
         include_tactile: bool = True,
         include_image_data: bool = True,
+        stop_event: threading.Event | None = None,
     ) -> int:
-        if duration_s <= 0:
-            raise ValueError("duration_s must be positive")
+        if not math.isfinite(duration_s) or duration_s <= 0:
+            raise ValueError("duration_s must be finite and positive")
+        if not math.isfinite(rate_hz) or not 0 < rate_hz <= 200:
+            raise ValueError("rate_hz must be finite and in (0, 200]")
         self.output.parent.mkdir(parents=True, exist_ok=True)
+        stop = stop_event or threading.Event()
         end = time.monotonic() + duration_s
         count = 0
         with self.output.open("x", encoding="utf-8") as stream:
@@ -53,14 +59,24 @@ class JsonlRecorder:
                 "format": "lingxi-x2-jsonl-v1",
                 "created_unix_ns": time.time_ns(),
                 "status": self.client.status().as_dict(),
+                "recording_options": {"rate_hz": rate_hz, "duration_s": duration_s,
+                                      "cameras": [str(c) for c in cameras], "include_tactile": include_tactile,
+                                      "include_image_data": include_image_data},
+                "evidence": "observations only; not motion or tactile contact acceptance",
             }
             stream.write(json.dumps(metadata, ensure_ascii=False) + "\n")
             stream.flush()
-            for observation in self.client.stream_observations(rate_hz, cameras, include_tactile):
-                stream.write(json.dumps(observation_to_dict(observation, include_image_data), ensure_ascii=False) + "\n")
+            deadline = time.monotonic()
+            while not stop.is_set() and time.monotonic() < end:
+                observation = self.client.observe(cameras, include_tactile, timeout_s=1.0)
+                if stop.is_set():
+                    break
+                stream.write(json.dumps(observation_to_dict(observation, include_image_data), ensure_ascii=False, allow_nan=False) + "\n")
                 stream.flush()
                 count += 1
-                if time.monotonic() >= end:
-                    break
+                now = time.monotonic()
+                deadline += 1.0 / rate_hz
+                if deadline <= now:
+                    deadline = now + 1.0 / rate_hz
+                stop.wait(max(0.0, min(deadline, end) - now))
         return count
-

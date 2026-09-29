@@ -1,0 +1,42 @@
+{
+  "positions_rad": {
+    "left_shoulder_pitch_joint": 0.4,
+    "left_shoulder_roll_joint": 0,
+    "left_shoulder_yaw_joint": 0,
+    "left_elbow_joint": -1.2,
+    "left_wrist_yaw_joint": 0,
+    "left_wrist_pitch_joint": 0,
+    "left_wrist_roll_joint": 0,
+    "right_shoulder_pitch_joint": 0.4,
+    "right_shoulder_roll_joint": 0,
+    "right_shoulder_yaw_joint": 0,
+    "right_elbow_joint": -1.2,
+    "right_wrist_yaw_joint": 0,
+    "right_wrist_pitch_joint": 0,
+    "right_wrist_roll_joint": 0
+  },
+  "gravity_torso_m_s2": [
+    0,
+    0,
+    -9.81
+  ],
+  "assumed_stiffness_nm_rad": 40.0,
+  "payloads": {
+    "left": {
+      "mass_kg": 0.0,
+      "com_wrist_m": [
+        0,
+        0,
+        0
+      ]
+    },
+    "right": {
+      "mass_kg": 0.0,
+      "com_wrist_m": [
+        0,
+        0,
+        0
+      ]
+    }
+  }
+}

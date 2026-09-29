@@ -10,7 +10,7 @@ from .models import ARM_JOINT_NAMES
 _DEG = math.pi / 180.0
 
 # Official AimDK 1.1.0 "joint_name_and_limit" guaranteed ranges for X2 Ultra.
-_ONE_ARM_LIMITS_DEG = (
+_LEFT_ARM_LIMITS_DEG = (
     (-176.5, 116.5),
     (-3.5, 174.5),
     (-146.5, 146.5),
@@ -19,7 +19,24 @@ _ONE_ARM_LIMITS_DEG = (
     (-30.0, 30.0),
     (-86.5, 41.5),
 )
-ARM_LIMITS_RAD = tuple((low * _DEG, high * _DEG) for _ in range(2) for low, high in _ONE_ARM_LIMITS_DEG)
+# Right roll axes are mirrored; repeating left limits admitted unsafe positive
+# right shoulder roll. Intersect the guaranteed ranges with BOTH audited v1.3
+# official and installed PC2 SDK bounds. This does not authorize physical motion.
+_RIGHT_ARM_LIMITS_DEG = tuple(
+    (-high, -low) if index in (1, 6) else (low, high)
+    for index, (low, high) in enumerate(_LEFT_ARM_LIMITS_DEG)
+)
+_MODEL_INTERSECTION_RAD = (
+    (-3.08, 2.04), (-0.061, 2.993), (-2.556, 2.556), (-2.3556, 0.),
+    (-2.556, 2.556), (-0.5236, 0.5236), (-1.5097, 0.724),
+    (-3.08, 2.04), (-2.993, 0.061), (-2.556, 2.556), (-2.3556, 0.),
+    (-2.556, 2.556), (-0.5236, 0.5236), (-0.724, 1.5097),
+)
+ARM_LIMITS_RAD = tuple(
+    (max(low * _DEG, model_low), min(high * _DEG, model_high))
+    for (low, high), (model_low, model_high) in zip(
+        _LEFT_ARM_LIMITS_DEG + _RIGHT_ARM_LIMITS_DEG, _MODEL_INTERSECTION_RAD, strict=True)
+)
 
 
 def validate_arm_target(values: Sequence[float]) -> tuple[float, ...]:

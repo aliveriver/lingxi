@@ -5,26 +5,35 @@ from pathlib import Path
 import sys
 
 
-def environment_updates(aimdk_prefix: str = "/agibot/software/common") -> dict[str, str]:
+def environment_updates(aimdk_prefix: str = "/agibot/software/common",
+                        ros_prefix: str = "/opt/ros/humble") -> dict[str, str]:
     prefix = Path(aimdk_prefix)
-    python_path = prefix / "local/lib/python3.10/dist-packages"
-    lib_path = prefix / "lib"
     updates: dict[str, str] = {}
 
     def prepend(name: str, value: Path) -> None:
-        existing = os.environ.get(name, "")
+        existing = updates.get(name, os.environ.get(name, ""))
         parts = [part for part in existing.split(":") if part]
         rendered = str(value)
-        if rendered not in parts:
-            parts.insert(0, rendered)
+        parts = [part for part in parts if part != rendered]
+        parts.insert(0, rendered)
         updates[name] = ":".join(parts)
 
-    if prefix.exists():
-        prepend("AMENT_PREFIX_PATH", prefix)
-    if python_path.exists():
-        prepend("PYTHONPATH", python_path)
-    if lib_path.exists():
-        prepend("LD_LIBRARY_PATH", lib_path)
+    # A fresh noninteractive PC2 SSH session has no ROS underlay in its env.
+    # Add only existing paths from the supported Humble/Python 3.10 install;
+    # keep the firmware's AimDK overlay first, and retain caller path entries.
+    # Do not alter ordinary development hosts that lack an AimDK installation.
+    if prefix.is_dir():
+        for root in (Path(ros_prefix), prefix):
+            if not root.is_dir():
+                continue
+            prepend("AMENT_PREFIX_PATH", root)
+            for relative in ("lib/python3.10/site-packages", "local/lib/python3.10/dist-packages"):
+                python_path = root / relative
+                if python_path.is_dir():
+                    prepend("PYTHONPATH", python_path)
+            lib_path = root / "lib"
+            if lib_path.is_dir():
+                prepend("LD_LIBRARY_PATH", lib_path)
     return updates
 
 

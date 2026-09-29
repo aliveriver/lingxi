@@ -150,7 +150,8 @@ class Ros2Backend(Backend):
             )
         except (ImportError, OSError) as exc:
             raise BackendUnavailableError(
-                "ROS 2/AimDK runtime not available. Run on PC2 with the matching firmware message package."
+                "ROS 2/AimDK runtime not available. Run on PC2 with ROS 2 Humble and the matching "
+                f"firmware message package. Import failed: {type(exc).__name__}: {exc}"
             ) from exc
 
         self._rclpy = rclpy

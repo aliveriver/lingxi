@@ -22,3 +22,8 @@ aside { display:flex; flex-direction:column; gap:16px; } .panel { padding:14px; 
 .confirmation { margin-top:16px; color:var(--amber); } #logs { display:block; } #logs:not(.active) { display:none; } pre { min-height:70vh; margin:0; background:#090c0e; border:1px solid var(--line); padding:16px; white-space:pre-wrap; color:#b9c7ce; }
 @media(max-width:900px){ header { padding:0 12px; } main { padding:10px; } #monitor,.control-layout { grid-template-columns:1fr; } .camera-pane { min-height:300px; } #camera { min-height:256px; } .joint-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .compact,.hand-band { grid-template-columns:1fr 1fr; } .hand-band { display:block; } .slider { grid-template-columns:110px 1fr 54px; } }
 
+.notice { border-left:3px solid var(--amber); padding:10px 14px; background:var(--surface); color:var(--amber); }
+.tactile-band { grid-column:1/-1; }.tactile-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+.tactile-surface { display:inline-block; vertical-align:top; margin:0 14px 14px 0; }.tactile-surface canvas { margin-top:6px; image-rendering:pixelated; }
+#data { gap:16px; }.record-options,.record-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.record-row { padding:12px 0; border-bottom:1px solid var(--line); }.record-options input[type=number] { width:85px; } a { color:var(--green); } button { cursor:pointer; } button:disabled { opacity:.4;cursor:not-allowed; }
+@media(max-width:900px){.tactile-grid{grid-template-columns:1fr}header{height:auto;min-height:64px;flex-wrap:wrap}.tab{padding:12px}.slider input{width:100%}}
