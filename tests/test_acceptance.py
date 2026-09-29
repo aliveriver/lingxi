@@ -23,3 +23,24 @@ def test_fixed_command_baseline_only_moves_selected_joint_and_returns(delta):
 def test_fixed_baseline_rejects_unbounded_delta(delta):
     with pytest.raises(SafetyInterlockError):
         list(fixed_baseline_plan([0.]*14, 0, delta))
+
+
+@pytest.mark.parametrize('delta', [.01, -.01])
+def test_two_second_quintic_is_smooth_bounded_and_returns_fixed_baseline(delta):
+    baseline = (.4, 0., 0., -1.2, 0., 0., 0.) * 2
+    plan = list(fixed_baseline_plan(baseline, 0, delta, profile='quintic', ramp_duration_s=2.))
+    assert len(plan) == 350
+    assert all(q[1:] == baseline[1:] for _, q in plan)
+    assert plan[49][1] == plan[-1][1] == baseline
+    assert plan[149][1][0] == pytest.approx(baseline[0]+delta)
+    # Peak rate remains BELOW the former 1 s linear diagnostic's |delta|/s.
+    gaps = [abs(b[1][0]-a[1][0]) for a,b in zip(plan,plan[1:])]
+    assert max(gaps) * 50 < abs(delta)
+    assert abs(plan[50][1][0]-baseline[0]) < abs(delta)*1e-5
+    assert abs(plan[298][1][0]-baseline[0]) < abs(delta)*1e-5
+
+
+@pytest.mark.parametrize('options', [{'profile':'other'}, {'ramp_duration_s':.5}, {'ramp_duration_s':float('nan')}])
+def test_invalid_fixed_baseline_profile_rejected(options):
+    with pytest.raises(SafetyInterlockError):
+        list(fixed_baseline_plan([0.]*14,0,.01,**options))

@@ -22,6 +22,8 @@ def main():
     parser.add_argument("--trace", type=Path, required=True)
     parser.add_argument("--delta-rad", type=float, default=.01,
                         help="Signed diagnostic offset, magnitude 0.01–0.02 rad")
+    parser.add_argument("--profile", choices=("linear", "quintic"), default="linear")
+    parser.add_argument("--ramp-duration", type=float, default=1., help="Each ramp duration, 1–3 seconds")
     args = parser.parse_args()
     delta = validate_acceptance_delta(args.delta_rad)
     if args.trace.exists():
@@ -29,7 +31,9 @@ def main():
     reexec_with_ros_environment()
     config = load_config("config/x2.yaml")
     config.control.command_echo = True
-    result = {"kind": "fixed_command_baseline_session", "joint_index": 0, "delta_rad": delta, "events": []}
+    result = {"kind": "fixed_command_baseline_session", "joint_index": 0, "delta_rad": delta,
+              "trajectory_profile": args.profile, "ramp_duration_s": args.ramp_duration,
+              "gravity_compensation_enabled": False, "events": []}
     frames = []
     code = 0
     with X2Client(config) as client, ControlTrace(client._backend) as trace:
@@ -56,7 +60,8 @@ def main():
             if any(abs(j["position"]-base) > 1e-5 for row in recent for j, base in zip(row["joints"], baseline)):
                 raise SafetyInterlockError("Standing HAL targets are not stationary")
             # Validate the entire bounded plan before changing MC mode.
-            plan = list(fixed_baseline_plan(baseline, 0, delta, config.control.publish_rate_hz))
+            plan = list(fixed_baseline_plan(baseline, 0, delta, config.control.publish_rate_hz,
+                                           profile=args.profile, ramp_duration_s=args.ramp_duration))
             result["baseline_command_rad"] = baseline
             result["baseline_hal_sample"] = rows[-1]
             event("before_mode")

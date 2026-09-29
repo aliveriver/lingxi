@@ -34,11 +34,12 @@ from .base import Backend
 class MockBackend(Backend):
     """Deterministic simulator for policy, UI, and data-pipeline development."""
 
-    def __init__(self, config: PlatformConfig | None = None) -> None:
+    def __init__(self, config: PlatformConfig | None = None, *, initial_arm_positions=None) -> None:
         self.config = config or PlatformConfig(backend="mock")
         self._lock = threading.RLock()
         self._started = False
-        self._arm = [0.0] * 14
+        from ..safety import validate_arm_target
+        self._arm = list(validate_arm_target(initial_arm_positions)) if initial_arm_positions is not None else [0.0] * 14
         self._hands = {Side.LEFT: [0.0] * 10, Side.RIGHT: [0.0] * 10}
         self._frame_index = 0
         self._motion_mode = "UPPERBODY_REMOTE_SPLIT"
