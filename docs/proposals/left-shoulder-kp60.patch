@@ -1,0 +1,11 @@
+--- upper_body_external.yaml
++++ upper_body_external.yaml
+@@ -10,7 +10,7 @@
+ 
+ arm_joints:
+   - name: "left_shoulder_pitch_joint"
+-    kp: 40.0
++    kp: 60.0
+     kd: 2.0
+   - name: "left_shoulder_roll_joint"
+     kp: 40.0

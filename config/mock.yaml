@@ -1,0 +1,7 @@
+backend: mock
+control:
+  enabled: true
+  authority: upper_body_mc
+web:
+  host: 127.0.0.1
+  port: 8080

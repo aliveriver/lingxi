@@ -1,0 +1,24 @@
+:root { color-scheme: dark; --bg:#101417; --surface:#171d21; --line:#2a343a; --text:#edf2f4; --muted:#9aa9b2; --green:#27b38a; --amber:#e2a83b; --red:#e05a5a; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing:0; }
+header { height:64px; display:flex; align-items:center; justify-content:space-between; padding:0 24px; border-bottom:1px solid var(--line); background:#12181b; position:sticky; top:0; z-index:2; }
+header>div { display:flex; align-items:center; gap:14px; } h1 { font-size:19px; margin:0; font-weight:650; } h2 { font-size:14px; margin:0; font-weight:650; }
+.status { color:var(--muted); border-left:1px solid var(--line); padding-left:14px; }
+nav { display:flex; height:100%; } button,.tab,select,input { font:inherit; letter-spacing:0; }
+.tab { border:0; border-bottom:2px solid transparent; color:var(--muted); background:transparent; padding:0 17px; cursor:pointer; }
+.tab.active { color:var(--text); border-color:var(--green); }
+main { max-width:1500px; margin:auto; padding:20px; } .view { display:none; } .view.active { display:grid; }
+#monitor { grid-template-columns:minmax(480px,2fr) minmax(260px,1fr); gap:16px; }
+.camera-pane,.panel,.joint-band,.hand-band,.control-surface { border:1px solid var(--line); background:var(--surface); border-radius:6px; overflow:hidden; }
+.camera-pane { min-height:460px; } .pane-title { height:44px; display:flex; align-items:center; justify-content:space-between; padding:0 14px; border-bottom:1px solid var(--line); color:var(--muted); }
+.pane-title h2 { color:var(--text); } #camera { width:100%; height:calc(100% - 44px); min-height:414px; object-fit:contain; display:block; background:#090c0e; }
+aside { display:flex; flex-direction:column; gap:16px; } .panel { padding:14px; } .panel h2 { margin-bottom:12px; }
+.capabilities { display:grid; grid-template-columns:1fr 1fr; gap:7px; } .cap { border:1px solid var(--line); padding:9px; min-height:56px; } .cap strong { display:block; font-size:12px; } .cap span { color:var(--muted); font-size:11px; }
+.cap.ok { border-left:3px solid var(--green); } .cap.no { border-left:3px solid var(--red); } dl { display:grid; grid-template-columns:1fr 1fr; gap:8px 12px; margin:0; } dt { color:var(--muted); } dd { margin:0; text-align:right; }
+.joint-band,.hand-band { grid-column:1/-1; } .joint-grid { display:grid; grid-template-columns:repeat(7,minmax(120px,1fr)); padding:12px; gap:8px; } .joint { border-left:2px solid var(--green); padding:6px 8px; background:#11171a; min-width:0; } .joint label { display:block; color:var(--muted); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .joint output { font-variant-numeric:tabular-nums; font-size:15px; }
+.hand-band { display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--line); } .hand-column { background:var(--surface); padding-top:12px; } .hand-column h2 { padding:0 14px 8px; } .compact { grid-template-columns:repeat(5,minmax(90px,1fr)); }
+.control-layout { display:grid; grid-template-columns:1fr 1fr; gap:16px; } .slider-list { padding:12px 16px; } .slider { display:grid; grid-template-columns:minmax(150px,1fr) 3fr 70px; gap:10px; align-items:center; min-height:38px; } .slider label { color:var(--muted); overflow:hidden; text-overflow:ellipsis; } input[type=range] { width:100%; accent-color:var(--green); } input[type=number],select { background:#0e1316; color:var(--text); border:1px solid var(--line); padding:8px; }
+.command-row { border-top:1px solid var(--line); padding:12px 16px; display:flex; justify-content:flex-end; gap:8px; } .command-row button { border:0; background:var(--green); color:#07110e; font-weight:700; padding:8px 16px; cursor:pointer; border-radius:4px; } .command-row button:disabled { opacity:.35; cursor:not-allowed; }
+.confirmation { margin-top:16px; color:var(--amber); } #logs { display:block; } #logs:not(.active) { display:none; } pre { min-height:70vh; margin:0; background:#090c0e; border:1px solid var(--line); padding:16px; white-space:pre-wrap; color:#b9c7ce; }
+@media(max-width:900px){ header { padding:0 12px; } main { padding:10px; } #monitor,.control-layout { grid-template-columns:1fr; } .camera-pane { min-height:300px; } #camera { min-height:256px; } .joint-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .compact,.hand-band { grid-template-columns:1fr 1fr; } .hand-band { display:block; } .slider { grid-template-columns:110px 1fr 54px; } }
+

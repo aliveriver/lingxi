@@ -1,0 +1,51 @@
+[project]
+name = "lingxi-x2"
+version = "0.1.0"
+description = "AgiBot X2/X2 Ultra embodied-AI development platform"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Lingxi X2 Platform Contributors" }]
+dependencies = [
+  "numpy>=1.24,<3",
+  "pillow>=10,<13",
+  "pydantic>=2.7,<3",
+  "pyyaml>=6,<7",
+]
+
+[project.optional-dependencies]
+web = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1"]
+dev = ["httpx>=0.27,<1", "pytest>=8,<10", "pytest-cov>=5,<8"]
+
+[project.scripts]
+x2 = "lingxi_x2.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lingxi_x2"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/lingxi_x2/web/static" = "lingxi_x2/web/static"
+
+[tool.uv]
+default-groups = ["dev"]
+
+[dependency-groups]
+dev = [
+  "httpx>=0.27,<1",
+  "pytest>=8,<10",
+  "pytest-cov>=5,<8",
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30,<1",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["lingxi_x2"]
+
