@@ -8,6 +8,12 @@ from .models import ARM_JOINT_NAMES
 
 
 _DEG = math.pi / 180.0
+# Software input range requested by the operator. This is not evidence that
+# every admitted excursion is qualified for live hardware execution.
+MIN_ACCEPTANCE_DELTA_RAD = 0.01
+MAX_ACCEPTANCE_DELTA_RAD = 1.0
+# Gross O10 anomaly envelope, NOT calibrated limits or verified zero/sign.
+HAND_PLAUSIBILITY_RAD = math.pi
 
 # Official AimDK 1.1.0 "joint_name_and_limit" guaranteed ranges for X2 Ultra.
 _LEFT_ARM_LIMITS_DEG = (
@@ -57,13 +63,18 @@ def validate_hand_target(values: Sequence[float]) -> tuple[float, ...]:
     result = tuple(float(value) for value in values)
     if not all(math.isfinite(value) for value in result):
         raise SafetyInterlockError("OmniHand target contains a non-finite value")
+    if any(abs(value) > HAND_PLAUSIBILITY_RAD for value in result):
+        raise SafetyInterlockError("Implausible hand hold position/target; O10 reference is not trustworthy")
     return result
 
 
 def validate_acceptance_delta(value: float) -> float:
     result = float(value)
-    if not math.isfinite(result) or not 0.01 <= abs(result) <= 1.0:
-        raise SafetyInterlockError("Acceptance-test delta must be finite and within 0.01-0.02 rad")
+    if not math.isfinite(result) or not MIN_ACCEPTANCE_DELTA_RAD <= abs(result) <= MAX_ACCEPTANCE_DELTA_RAD:
+        raise SafetyInterlockError(
+            f"Acceptance-test delta magnitude must be finite and within "
+            f"{MIN_ACCEPTANCE_DELTA_RAD:g}-{MAX_ACCEPTANCE_DELTA_RAD:.1f} rad"
+        )
     return result
 
 

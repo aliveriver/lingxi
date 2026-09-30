@@ -1,10 +1,11 @@
 import pytest
+import math
 
 from lingxi_x2.acceptance import fixed_baseline_plan
 from lingxi_x2.errors import SafetyInterlockError
 
 
-@pytest.mark.parametrize("delta", [.01, .02, -.01, -.02])
+@pytest.mark.parametrize("delta", [.01, .02, -.01, -.02, .03, -.03, .2, -.2, .5, -.5, 1., -1.])
 def test_fixed_command_baseline_only_moves_selected_joint_and_returns(delta):
     baseline = (.4, 0., 0., -1.2, 0., 0., 0.) * 2
     plan = list(fixed_baseline_plan(baseline, 0, delta))
@@ -19,10 +20,19 @@ def test_fixed_command_baseline_only_moves_selected_joint_and_returns(delta):
         "recovery_ramp": 50, "recovery_hold": 50}
 
 
-@pytest.mark.parametrize("delta", [.03, .2, -.2, float("nan"), float("inf")])
+@pytest.mark.parametrize("delta", [0., math.nextafter(.01, 0.), -math.nextafter(.01, 0.),
+    math.nextafter(1., math.inf), -math.nextafter(1., math.inf),
+    float("nan"), float("inf"), -float("inf")])
 def test_fixed_baseline_rejects_unbounded_delta(delta):
     with pytest.raises(SafetyInterlockError):
         list(fixed_baseline_plan([0.]*14, 0, delta))
+
+
+def test_admitted_delta_does_not_override_absolute_joint_limits():
+    baseline = [.4, 0., 0., -1.2, 0., 0., 0.] * 2
+    baseline[0] = 1.9
+    with pytest.raises(SafetyInterlockError, match='outside'):
+        list(fixed_baseline_plan(baseline, 0, .5))
 
 
 @pytest.mark.parametrize('delta', [.01, -.01])

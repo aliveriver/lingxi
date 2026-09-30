@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 
 from lingxi_x2.acceptance import fixed_baseline_plan
+from lingxi_x2.acceptance_report import evaluate_trace
 from lingxi_x2.backends.ros_environment import reexec_with_ros_environment
 from lingxi_x2.client import X2Client
 from lingxi_x2.config import load_config
@@ -14,6 +15,16 @@ from lingxi_x2.errors import SafetyInterlockError
 from lingxi_x2.models import ARM_JOINT_NAMES
 from lingxi_x2.publication import publish_points
 from lingxi_x2.safety import validate_acceptance_delta
+from lingxi_x2.tracking_guard import check_tracking
+import math
+
+
+def review_completed_session(trace, execution_code):
+    """Publication completion alone must not yield a successful experiment."""
+    review = evaluate_trace(trace)
+    trace["result"]["acceptance"] = review
+    # Preserve execution failures; an unsupported/insufficient trace is not a pass.
+    return execution_code or (0 if review["verdict"] == "pass_under_criteria" else 3)
 
 
 def main():
@@ -21,10 +32,14 @@ def main():
     parser.add_argument("--confirm-hardware", action="store_true", required=True)
     parser.add_argument("--trace", type=Path, required=True)
     parser.add_argument("--delta-rad", type=float, default=.01,
-                        help="Signed diagnostic offset, magnitude 0.01–0.02 rad")
+                        help="Signed offset checked against the configured acceptance range; not a motion qualification")
     parser.add_argument("--profile", choices=("linear", "quintic"), default="linear")
     parser.add_argument("--ramp-duration", type=float, default=1., help="Each ramp duration, 1–3 seconds")
+    parser.add_argument("--max-tracking-error-rad", type=float, required=True,
+                        help="Explicit reviewed bound for all 14 command-minus-encoder errors; no inferred default")
     args = parser.parse_args()
+    if not math.isfinite(args.max_tracking_error_rad) or args.max_tracking_error_rad <= 0:
+        parser.error("Tracking error bound must be finite and positive")
     delta = validate_acceptance_delta(args.delta_rad)
     if args.trace.exists():
         raise SystemExit("Choose an unused trace path")
@@ -33,6 +48,8 @@ def main():
     config.control.command_echo = True
     result = {"kind": "fixed_command_baseline_session", "joint_index": 0, "delta_rad": delta,
               "trajectory_profile": args.profile, "ramp_duration_s": args.ramp_duration,
+              "max_tracking_error_rad": args.max_tracking_error_rad,
+              "max_publication_interval_s": .05,
               "gravity_compensation_enabled": False, "events": []}
     frames = []
     code = 0
@@ -64,6 +81,11 @@ def main():
                                            profile=args.profile, ramp_duration_s=args.ramp_duration))
             result["baseline_command_rad"] = baseline
             result["baseline_hal_sample"] = rows[-1]
+            def check_target(point):
+                arm = client.arm_state()
+                check_tracking(point, arm, now_ns=time.monotonic_ns(),
+                               max_error_rad=args.max_tracking_error_rad)
+            check_target(baseline)
             event("before_mode")
             config.control.enabled = True
             try:
@@ -85,7 +107,8 @@ def main():
                 client._publication_frames = frames
                 with client._backend.command_stream("arm"):
                     publish_points(points(), lambda point: client._backend.publish_arm(
-                        point, (0.,)*14, (0.,)*14, 20., 2.), config.control.publish_rate_hz, frames)
+                        point, (0.,)*14, (0.,)*14, 20., 2.), config.control.publish_rate_hz, frames,
+                        max_frame_interval_s=.05, before_publish=check_target)
                 result["publication_stats"] = client.publication_stats()
                 event("recovery_complete")
                 time.sleep(.5)
@@ -106,9 +129,11 @@ def main():
             time.sleep(.3)
             snap = trace.snapshot()
             snap["result"] = result
+            code = review_completed_session(snap, code)
             args.trace.parent.mkdir(parents=True, exist_ok=True)
             args.trace.write_text(json.dumps(snap), encoding="utf-8")
     print(json.dumps({"trace": str(args.trace), "error": result.get("error"),
+                      "acceptance_verdict": result["acceptance"]["verdict"],
                       "published_count": len(frames)}), flush=True)
     return code
 

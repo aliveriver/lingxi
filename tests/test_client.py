@@ -76,8 +76,8 @@ def test_single_joint_acceptance_is_bounded_and_recovers(client: X2Client) -> No
         "recovery_feedback",
         "publishing_stopped",
     ]
-    with pytest.raises(SafetyInterlockError, match="0.01-0.02"):
-        client.test_arm_joint(0, 0.03, confirm_hardware=True)
+    with pytest.raises(SafetyInterlockError, match="0.01-1.0"):
+        client.test_arm_joint(0, 1.000001, confirm_hardware=True)
 
 
 def test_mode_change_returns_before_and_after_state(client: X2Client) -> None:

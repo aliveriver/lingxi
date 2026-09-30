@@ -63,6 +63,27 @@ def test_published_targets_and_mode_restore_cannot_pass_bad_motion(gain,residual
     assert report['verdict']=='fail' and failed(report,check)
 
 
+@pytest.mark.parametrize('gain,execution_code,expected', [(1.,0,0),(.134,0,3),(1.,2,2)])
+def test_session_exit_code_uses_encoder_acceptance(gain, execution_code, expected):
+    import runpy
+    from pathlib import Path
+    session = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'scripts/command_baseline_session.py'))
+    trace = synthetic_trace(gain=gain)
+    assert session['review_completed_session'](trace, execution_code) == expected
+    assert trace['result']['acceptance']['verdict'] == ('fail' if gain < 1 else 'pass_under_criteria')
+    assert not trace['result']['acceptance']['execution_authorized']
+
+
+def test_session_inconclusive_evidence_cannot_exit_successfully():
+    import runpy
+    from pathlib import Path
+    session = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'scripts/command_baseline_session.py'))
+    trace = synthetic_trace()
+    trace['samples']['arm_state'] = []
+    assert session['review_completed_session'](trace, 0) == 3
+    assert trace['result']['acceptance']['verdict'] == 'inconclusive'
+
+
 @pytest.mark.parametrize('damage,check', [
     ('drops','trace_no_buffer_drops'),('errors','trace_parse_errors'),('mc','urs_standing_throughout'),
     ('fault','arm_faults_zero'),('source_clock','arm_state_stamp_ns_increasing'),

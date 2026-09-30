@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import math
 import gc
+import time
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -141,6 +143,31 @@ def _joint_values(sample, names):
     return values
 
 
+class StaticSettlingError(SafetyInterlockError):
+    """Valid IMU telemetry that does not yet describe static standing."""
+
+
+def static_imu(sample):
+    if sample["frame_id"] != "base_link":
+        raise SafetyInterlockError("Unexpected IMU frame")
+    covariance = _vec(sample["orientation_covariance"],9)
+    if any(covariance[i] < 0 for i in (0,4,8)):
+        raise SafetyInterlockError("IMU orientation unavailable")
+    accel = _vec(sample["linear_acceleration_m_s2"], 3)
+    quaternion = _vec(sample["orientation_xyzw"],4)
+    norm = _norm(quaternion)
+    if not .99 <= norm <= 1.01:
+        raise SafetyInterlockError("Invalid IMU quaternion norm")
+    x,y,z,w = (v/norm for v in quaternion)
+    g = (-9.81*2*(x*z-y*w), -9.81*2*(y*z+x*w), -9.81*(1-2*(x*x+y*y)))
+    if not 9 <= _norm(accel) <= 10.5:
+        raise StaticSettlingError("IMU acceleration inconsistent with static standing")
+    angle = _angle(g, tuple(-x for x in accel))
+    if angle > math.radians(3):
+        raise StaticSettlingError("IMU quaternion/acceleration directions disagree")
+    return g, {"acceleration_norm": _norm(accel), "quaternion_acceleration_angle_rad": angle}
+
+
 class LimitedGravityGuard:
     def __init__(self, urdf, factory_calibration):
         self.urdf = urdf
@@ -225,26 +252,7 @@ class LimitedGravityGuard:
         sensor_checks, imu_gravity = {}, {}
         for key in ("chest_imu", "pelvis_imu"):
             sample = snapshot["samples"][key]
-            if sample["frame_id"] != "base_link":
-                raise SafetyInterlockError("Unexpected IMU frame")
-            covariance = _vec(sample["orientation_covariance"],9)
-            if any(covariance[i] < 0 for i in (0,4,8)):
-                raise SafetyInterlockError("IMU orientation unavailable")
-            accel = _vec(sample["linear_acceleration_m_s2"], 3)
-            if not 9 <= _norm(accel) <= 10.5:
-                raise SafetyInterlockError("IMU acceleration inconsistent with static standing")
-            quaternion = _vec(sample["orientation_xyzw"],4)
-            norm = _norm(quaternion)
-            if not .99 <= norm <= 1.01:
-                raise SafetyInterlockError("Invalid IMU quaternion norm")
-            x,y,z,w = (v/norm for v in quaternion)
-            g = (-9.81*2*(x*z-y*w), -9.81*2*(y*z+x*w), -9.81*(1-2*(x*x+y*y)))
-            imu_gravity[key] = g
-            angle = _angle(g, tuple(-x for x in accel))
-            if angle > math.radians(3):
-                raise SafetyInterlockError("IMU quaternion/acceleration directions disagree")
-            sensor_checks[key] = {"acceleration_norm": _norm(accel),
-                                  "quaternion_acceleration_angle_rad": angle}
+            imu_gravity[key], sensor_checks[key] = static_imu(sample)
         # Static gravity torque is linear in g. Three basis evaluations replace
         # six repeated kinematic evaluations without approximating the model.
         self.prepare_desired_poses([q])
@@ -291,21 +299,36 @@ def check_encoder_excursion(joints, reference):
 
 
 @contextmanager
-def diagnostic_mode(client, result, *, dry_run):
+def diagnostic_mode(client, result, *, dry_run, prepare=None, hand_targets=None):
     """Single trial only; restore even if mode entry or streaming fails."""
     if client.status().backend != "ros2" or client.config.control.enabled:
         raise SafetyInterlockError("Requires ROS with disk control disabled")
     if dry_run:
+        if prepare is not None:
+            prepare()
         yield
         return
     client.config.control.enabled = True
     try:
+        result["mode_entry_requested_monotonic_ns"] = time.monotonic_ns()
         result["mode_entry"] = client.set_motion_mode("UPPERBODY_REMOTE_SPLIT", confirm_hardware=True)
-        with client._backend.command_stream("arm"):
+        result["mode_entry_returned_monotonic_ns"] = time.monotonic_ns()
+        if prepare is not None:
+            prepare()
+        options = {} if hand_targets is None else {"hand_targets": hand_targets}
+        with client._backend.command_stream("arm", **options):
             yield
+    except BaseException as exc:
+        result["primary_error"] = f"{type(exc).__name__}: {exc}"
+        raise
     finally:
         try:
+            result["mode_restore_requested_monotonic_ns"] = time.monotonic_ns()
             result["mode_restore"] = client.set_motion_mode("STAND_DEFAULT", confirm_hardware=True)
+            result["mode_restore_returned_monotonic_ns"] = time.monotonic_ns()
+        except BaseException as exc:
+            result["mode_restore_error"] = f"{type(exc).__name__}: {exc}"
+            raise
         finally:
             client.config.control.enabled = False
 
@@ -318,11 +341,16 @@ def bounded_timing_window():
     bounded. Restore the caller's GC state on every exit, including exceptions.
     """
     enabled = gc.isenabled()
+    previous_switch_interval = sys.getswitchinterval()
+    # ROS callbacks and the command loop share the Python GIL. Bound each
+    # Python thread's turn without changing OS priorities or robot services.
+    sys.setswitchinterval(min(previous_switch_interval, .001))
     if enabled:
         gc.collect()
         gc.disable()
     try:
         yield
     finally:
+        sys.setswitchinterval(previous_switch_interval)
         if enabled:
             gc.enable()

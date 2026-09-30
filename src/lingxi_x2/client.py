@@ -10,7 +10,8 @@ import time
 from .backends.base import Backend
 from .backends.mock import MockBackend
 from .config import PlatformConfig, load_config
-from .errors import BackendUnavailableError, SafetyInterlockError
+from .errors import BackendUnavailableError, DataTimeoutError, SafetyInterlockError
+from .motion_feedback import arm_tracking_report
 from .models import (
     ArmCommand,
     ArmState,
@@ -152,6 +153,11 @@ class X2Client(AbstractContextManager["X2Client"]):
         return execute_mock_compensated_session(self, urdf, request, journal)
 
     def move_arm(self, command: ArmCommand, *, confirm_hardware: bool = False, hold_duration_s: float = 0.0) -> dict[str, object]:
+        """Publish a trajectory and report final encoder error separately.
+
+        Returning normally means publishing completed, not that the arm arrived.
+        The feedback snapshot is not a settled-window acceptance verdict.
+        """
         self._require_confirmation(confirm_hardware)
         self._validate_duration(command.duration_s, "duration_s")
         self._validate_duration(hold_duration_s, "hold_duration_s", allow_zero=True)
@@ -191,7 +197,19 @@ class X2Client(AbstractContextManager["X2Client"]):
         self._publication_frames = []
         with self._backend.command_stream("arm"):
             publish_points(points, publish, rate, self._publication_frames)
-        return self.publication_stats()
+            # Read while the same stream is still owned, without waiting or
+            # sending corrective targets. Missing feedback cannot imply arrival.
+            try:
+                feedback = self.arm_state(timeout_s=0.0)
+                tracking = arm_tracking_report(
+                    target, feedback, now_ns=time.monotonic_ns(),
+                    not_before_ns=self._publication_frames[-1]["publish_return_monotonic_ns"],
+                    max_age_ns=round(self.config.ros.state_timeout_s * 1e9),
+                )
+            except DataTimeoutError as exc:
+                tracking = {"status": "unavailable", "motion_verified": False,
+                            "reason": "feedback_timeout", "detail": str(exc)}
+        return {**self.publication_stats(), "tracking": tracking}
 
     @staticmethod
     def _validate_duration(value: float, label: str, *, allow_zero: bool = False) -> None:
@@ -271,7 +289,10 @@ class X2Client(AbstractContextManager["X2Client"]):
         stop_observation_s: float = 0.25,
         confirm_hardware: bool = False,
     ) -> dict[str, object]:
-        """Move one arm joint by 0.01-0.02 rad, return to baseline, then stop publishing."""
+        """Mock-only joint test within the configured acceptance input range.
+
+        Hardware rejects this measured-baseline path before planning or motion.
+        """
         self._require_confirmation(confirm_hardware)
         self._reject_hardware_measured_baseline_test()
         if self.config.control.authority != "upper_body_mc":

@@ -80,7 +80,7 @@ class MockBackend(Backend):
         self._require_started()
         with self._lock:
             joints = tuple(
-                JointSample(name, position, 0.0, 0.0)
+                JointSample(name, position, 0.0, 0.0, fault_code=0)
                 for name, position in zip(ARM_JOINT_NAMES, self._arm, strict=True)
             )
         return ArmState(self._timestamp(), joints, domain_state=0, source="mock/arm")
