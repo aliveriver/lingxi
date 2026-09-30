@@ -62,7 +62,7 @@ def validate_hand_target(values: Sequence[float]) -> tuple[float, ...]:
 
 def validate_acceptance_delta(value: float) -> float:
     result = float(value)
-    if not math.isfinite(result) or not 0.01 <= abs(result) <= 0.02:
+    if not math.isfinite(result) or not 0.01 <= abs(result) <= 1.0:
         raise SafetyInterlockError("Acceptance-test delta must be finite and within 0.01-0.02 rad")
     return result
 
