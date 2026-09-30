@@ -25,5 +25,9 @@ aside { display:flex; flex-direction:column; gap:16px; } .panel { padding:14px; 
 .notice { border-left:3px solid var(--amber); padding:10px 14px; background:var(--surface); color:var(--amber); }
 .tactile-band { grid-column:1/-1; }.tactile-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
 .tactile-surface { display:inline-block; vertical-align:top; margin:0 14px 14px 0; }.tactile-surface canvas { margin-top:6px; image-rendering:pixelated; }
+.tactile-old canvas { filter:grayscale(1); opacity:.4; }
+.tactile-state { font-weight:600; overflow-wrap:anywhere; }
+.tactile-detail { font-size:12px; overflow-wrap:anywhere; }
+.tactile-empty { border:1px dashed #69758a; padding:20px; }
 #data { gap:16px; }.record-options,.record-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }.record-row { padding:12px 0; border-bottom:1px solid var(--line); }.record-options input[type=number] { width:85px; } a { color:var(--green); } button { cursor:pointer; } button:disabled { opacity:.4;cursor:not-allowed; }
 @media(max-width:900px){.tactile-grid{grid-template-columns:1fr}header{height:auto;min-height:64px;flex-wrap:wrap}.tab{padding:12px}.slider input{width:100%}}

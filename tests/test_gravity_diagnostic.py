@@ -266,3 +266,55 @@ def test_bounded_gc_window_restores_original_state_after_failure():
             assert gc.isenabled()==enabled
     finally:
         gc.enable() if original else gc.disable()
+
+
+@pytest.mark.parametrize('bias_only', [False, True])
+def test_matched_control_preserves_every_phase_and_desired_pose(bias_only):
+    q = (.4, 0., 0., -1.2, 0., 0., 0.)*2
+    on = list(limited_gravity_plan(q, bias_only=bias_only))
+    off = list(limited_gravity_plan(q, bias_only=bias_only, compensation_enabled=False))
+    assert len(on) == len(off) == (350 if bias_only else 650)
+    assert [f['phase'] for f in on] == [f['phase'] for f in off]
+    for a, b in zip(on, off):
+        assert a['desired_rad'] == b['desired_rad'] == b['command_rad']
+        assert b['applied_bias_rad'] == 0.
+        assert a['command_rad'][1:] == b['command_rad'][1:] == list(q[1:])
+        assert a['command_rad'][0]-b['command_rad'][0] == pytest.approx(a['applied_bias_rad'])
+    assert on[0]['command_rad'] == on[-1]['command_rad'] == off[-1]['command_rad'] == list(q)
+
+
+def test_model_plan_rejects_sent_bias_crossing_urdf_limit_before_stream(model):
+    from lingxi_x2.gravity_diagnostic import validate_model_plan
+    # The desired pose and zero-bias motion fit; ONLY the added bias crosses.
+    root = ET.parse(model).getroot()
+    root.find("joint[@name='left_shoulder_pitch_joint']/limit").set('upper', '.011')
+    ET.ElementTree(root).write(model)
+    guard = LimitedGravityGuard(model, calibration())
+    off = list(limited_gravity_plan([0.]*14, compensation_enabled=False))
+    on = list(limited_gravity_plan([0.]*14))
+    validate_model_plan(guard.model, off)
+    with pytest.raises(SafetyInterlockError, match='command_rad outside installed model limits'):
+        validate_model_plan(guard.model, on)
+
+
+@pytest.mark.parametrize('field,value', [('bias_only', 1), ('compensation_enabled', 'off'),
+                                        ('compensation_enabled', None)])
+def test_diagnostic_flags_are_not_truthy_coerced(field, value):
+    with pytest.raises(ValueError):
+        list(limited_gravity_plan([0.]*14, **{field: value}))
+
+
+def test_live_cli_requires_explicit_on_off_before_ros_initialization(monkeypatch, tmp_path):
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1]/'scripts/gravity_baseline_session.py'
+    spec = importlib.util.spec_from_file_location('gravity_session_under_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, 'reexec_with_ros_environment', lambda: pytest.fail('Touched ROS'))
+    monkeypatch.setattr(module, 'X2Client', lambda *_: pytest.fail('Created client'))
+    with pytest.raises(SystemExit) as exc:
+        module.main(['--confirm-hardware', '--trace', str(tmp_path/'unused.json')])
+    assert exc.value.code == 2
+    args = module.build_parser().parse_args(['--dry-run', '--compensation', 'off', '--trace', 'new.json'])
+    assert args.compensation == 'off' and args.dry_run

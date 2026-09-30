@@ -26,18 +26,41 @@ RATE_HZ = 50.
 MAX_BIAS_RATE = .002
 MAX_COMMAND_RATE = .012
 MAX_EXCURSION = .012
+MODEL_SHA256 = "f84fcd22187d7f3d9730f36b06b39e49fb6a59cd8b1d26bcb5a817dfd300b40a"
+CALIBRATION_SHA256 = "ce405931791f04ffdc14b6ac511e43e74912f0a86370ab327d20070d6c8dc0ef"
 
 
-def limited_gravity_plan(baseline, *, bias_only=False):
-    baseline = validate_arm_target(baseline)
-    previous_bias, previous_command = 0., baseline
+def diagnostic_phases(*, bias_only=False):
+    if type(bias_only) is not bool:
+        raise ValueError("bias_only must be boolean")
     phases = (("baseline_hold", 1.), ("bias_in", 2.), ("compensated_baseline_hold", 1.),
               ("target_ramp", 2.), ("target_hold", 1.), ("recovery_ramp", 2.),
               ("compensated_recovery_hold", 1.), ("bias_out", 2.), ("recovery_hold", 1.))
-    if bias_only:
-        phases = tuple(p for p in phases if p[0] in {
-            "baseline_hold", "bias_in", "compensated_baseline_hold", "bias_out", "recovery_hold"})
-    for phase, duration in phases:
+    return tuple(p for p in phases if not bias_only or p[0] in {
+        "baseline_hold", "bias_in", "compensated_baseline_hold", "bias_out", "recovery_hold"})
+
+
+def diagnostic_protocol(*, bias_only=False, compensation_enabled=True):
+    if type(compensation_enabled) is not bool:
+        raise ValueError("compensation_enabled must be boolean")
+    phases = diagnostic_phases(bias_only=bias_only)
+    return {"version": 1, "profile": "quintic", "rate_hz": RATE_HZ,
+            "phases": [{"name": name, "duration_s": duration, "frames": round(duration*RATE_HZ)}
+                       for name, duration in phases],
+            "joint_index": 0, "delta_rad": 0. if bias_only else DELTA_RAD,
+            "bias_only": bias_only, "compensation_enabled": compensation_enabled,
+            "bias_limit_rad": BIAS_LIMIT_RAD, "assumed_stiffness_nm_rad": 40.,
+            "additional_payload_mass_kg": 0., "max_interval_s": .05}
+
+
+def limited_gravity_plan(baseline, *, bias_only=False, compensation_enabled=True):
+    # The control arm retains every phase and every guard. Only applied bias
+    # changes; it is not a shorter trajectory or an encoder-based new baseline.
+    if type(compensation_enabled) is not bool:
+        raise ValueError("compensation_enabled must be boolean")
+    baseline = validate_arm_target(baseline)
+    previous_bias, previous_command = 0., baseline
+    for phase, duration in diagnostic_phases(bias_only=bias_only):
         count = round(duration * RATE_HZ)
         for step in range(1, count + 1):
             s = quintic(step / count)
@@ -47,7 +70,7 @@ def limited_gravity_plan(baseline, *, bias_only=False):
             desired = list(baseline)
             desired[0] += DELTA_RAD * motion
             command = list(desired)
-            bias = alpha * BIAS_LIMIT_RAD
+            bias = alpha * BIAS_LIMIT_RAD if compensation_enabled else 0.
             command[0] += bias
             command = validate_arm_target(command)
             if (abs(command[0]-baseline[0]) > MAX_EXCURSION + 1e-12
@@ -57,6 +80,16 @@ def limited_gravity_plan(baseline, *, bias_only=False):
             yield {"phase": phase, "desired_rad": desired, "bias_fraction": alpha,
                    "applied_bias_rad": bias, "command_rad": list(command)}
             previous_bias, previous_command = bias, command
+
+
+def validate_model_plan(model, plan):
+    """Check desired AND sent positions before opening a stream; never clamp."""
+    joints = [j for side in ("left", "right") for j in model.arms[side]]
+    for frame in plan:
+        for field in ("desired_rad", "command_rad"):
+            q = validate_arm_target(frame[field])
+            if any(not j.lower <= value <= j.upper for j, value in zip(joints, q)):
+                raise SafetyInterlockError(f"{field} outside installed model limits in {frame['phase']}")
 
 
 def _angle(a, b):

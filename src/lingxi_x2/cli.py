@@ -62,6 +62,17 @@ def build_parser() -> argparse.ArgumentParser:
     gravity = sub.add_parser("gravity-report", help="Offline URDF gravity report; never connects to ROS")
     gravity.add_argument("--urdf", type=Path, required=True)
     gravity.add_argument("--input", type=Path, required=True, help="Explicit pose, torso gravity and payload JSON")
+    pair_plan = sub.add_parser("plan-gravity-comparison", help="Offline matched 650-frame on/off diagnostic previews; no execution")
+    pair_plan.add_argument("--urdf", type=Path, required=True)
+    pair_plan.add_argument("--baseline", type=Path, required=True, help="JSON array of 14 fixed HAL command positions")
+    pair_plan.add_argument("--output", type=Path, required=True)
+    trial_review = sub.add_parser("analyze-gravity-trial", help="Offline raw capped-diagnostic trace review")
+    trial_review.add_argument("trace", type=Path)
+    trial_review.add_argument("--output", type=Path, required=True)
+    pair_review = sub.add_parser("compare-gravity-trials", help="Offline comparison of raw off/on traces; never grants execution")
+    pair_review.add_argument("control", type=Path)
+    pair_review.add_argument("treatment", type=Path)
+    pair_review.add_argument("--output", type=Path, required=True)
     for name, help_text in (
         ("plan-compensation", "Offline quintic/bounded gravity-bias plan; no ROS connection"),
         ("mock-compensation", "Execute declared compensation scenario on an isolated mock backend"),
@@ -160,6 +171,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command in {"plan-gravity-comparison", "analyze-gravity-trial", "compare-gravity-trials"}:
+        from .gravity_trial_report import preview_pair, evaluate_file, compare_files
+        from .replay import strict_json
+        from .errors import X2Error
+        import xml.etree.ElementTree as ET
+        try:
+            if args.command == "plan-gravity-comparison":
+                report = preview_pair(args.urdf, strict_json(args.baseline.read_text()))
+                code = 0
+            elif args.command == "analyze-gravity-trial":
+                report = evaluate_file(args.trace)
+                code = 0 if report['verdict'] in {'bias_only_diagnostic_complete', 'single_trial_pass_under_engineering_criteria'} else 3
+            else:
+                report = compare_files(args.control, args.treatment)
+                code = 0 if report['verdict'] == 'paired_numeric_comparison' else 3
+            with args.output.open("x", encoding="utf-8") as output:
+                json.dump(report, output, ensure_ascii=False, allow_nan=False, indent=2)
+            _json({k: v for k, v in report.items() if k not in {'plans', 'windows', 'sessions', 'quality_checks'}})
+            return code
+        except (OSError, ValueError, TypeError, KeyError, X2Error, ET.ParseError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     if args.command in {"plan-compensation", "mock-compensation", "replay-compensation"}:
         from .compensation import CompensationRequest, plan_compensated_joint_session
         from .errors import X2Error

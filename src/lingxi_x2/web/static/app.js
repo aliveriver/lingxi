@@ -14,24 +14,12 @@ function initializeTargets(kind,joints){ document.querySelectorAll(`[data-${kind
 function controlButtons(){const enabled=motionAllowed&&initialized&&!busy&&$('#armed').checked; $('#send-arm').disabled=!enabled;$('#send-hand').disabled=!enabled;}
 $('#armed').onchange=controlButtons;
 $('#hand-side').onchange=()=>{if(liveState)initializeTargets('hand',liveState.hands[$('#hand-side').value].joints);};
-function drawTactile(root,frames,referenceNs,isReplay=false){
-  root.replaceChildren();
-  for(const [side,frame] of Object.entries(frames)){
-    const section=document.createElement('section'); const label=document.createElement('p');
-    const age=(referenceNs-frame.timestamp.monotonic_ns)/1e9;
-    label.textContent=`${side} · 源时间 ${frame.timestamp.sec}.${String(frame.timestamp.nanosec).padStart(9,'0')} · ${isReplay?'采集时':''}接收龄 ${age.toFixed(3)} s${age>0.5||age<0?' · 过期/时间异常':''}`;
-    section.append(label);
-    for(const surface of [frame.palm,frame.back_of_hand,...Object.values(frame.fingertips)]){
-      const wrap=document.createElement('div');wrap.className='tactile-surface';
-      const title=document.createElement('div');title.textContent=`${surface.name} · peak ${Math.max(...surface.values)}`;wrap.append(title);
-      const canvas=document.createElement('canvas');const [rows,cols]=surface.shape;canvas.width=cols*24;canvas.height=rows*24;
-      const ctx=canvas.getContext('2d');
-      surface.values.forEach((v,i)=>{const x=i%cols*24,y=Math.floor(i/cols)*24;ctx.fillStyle=`rgb(${Math.round(v*0.9)},${30+Math.round(v*0.6)},${40+Math.round(v*0.2)})`;ctx.fillRect(x,y,23,23);ctx.fillStyle=v>150?'#101417':'#fff';ctx.font='10px monospace';ctx.fillText(String(v),x+2,y+15);});
-      canvas.setAttribute('aria-label',`${side} ${surface.name}: ${surface.values.join(', ')}`);wrap.append(canvas);section.append(wrap);
-    }
-    root.append(section);
-  }
+let liveTactileError=null;
+function updateTactileAge(){
+  const text=LingxiTactile.update($('#live-tactile'));
+  if(text)$('#tactile-status').textContent=liveTactileError||text;
 }
+setInterval(updateTactileAge,250);
 async function refreshStatus(){
   try{
     const [value,ready]=await Promise.all([api('/api/status'),api('/api/readiness')]);motionAllowed=ready.web_motion_allowed;
@@ -47,10 +35,10 @@ async function refreshState(){
     const value=await api('/api/state');liveState=value;
     $('#arm-joints').innerHTML=jointMarkup(value.arm.joints);
     for(const side of ['left','right'])$('#'+side+'-hand').innerHTML=jointMarkup(value.hands[side].joints);
-    drawTactile($('#live-tactile'),value.tactile,value.received_monotonic_ns);
-    $('#tactile-status').textContent=value.tactile_error||(!Object.keys(value.tactile).length?'压力数据不可用':'已收到压力数据；单位为原始字节值');
+    liveTactileError=value.tactile_error;
+    LingxiTactile.render($('#live-tactile'),value.tactile,value.tactile_quality);updateTactileAge();
     if(!initialized&&motionAllowed){initializeTargets('arm',value.arm.joints);initializeTargets('hand',value.hands[$('#hand-side').value].joints);initialized=true;}
-  }catch(e){initialized=false;$('#live-tactile').replaceChildren();$('#tactile-status').textContent='实时读取失败，压力不可用';log('state error',String(e));}
+  }catch(e){initialized=false;liveTactileError='实时读取失败，压力不可用';LingxiTactile.render($('#live-tactile'),{},null);updateTactileAge();log('state error',String(e));}
   controlButtons();
 }
 function refreshCamera(){const img=$('#camera');img.onload=()=>{$('#frame-meta').textContent=`${img.naturalWidth} x ${img.naturalHeight}`;setTimeout(refreshCamera,500);};img.onerror=()=>{$('#frame-meta').textContent='图像不可用';setTimeout(refreshCamera,2000);};img.src=`/api/cameras/rgbd_front_rgb/frame?t=${Date.now()}`;}
@@ -81,7 +69,7 @@ async function showReplay(){
   $('#replay-prev').disabled=true;$('#replay-next').disabled=true;
   try{const value=await api(`/api/recordings/${replayId}/samples?offset=${replayIndex}&limit=1`);const sample=value.samples[0];if(!sample)throw new Error('缺少回放帧');const o=sample.observation;
     $('#replay-source').textContent=`历史记录 ${replayId} · 原数据源 ${value.metadata.status.backend} · 帧 ${replayIndex+1}/${replayCount} · 原采集时间 ${o.captured_monotonic_ns} ns · 图像元数据 ${Object.keys(sample.camera_metadata).join(', ')||'无'}（此视图不显示图像）`;
-    $('#replay-joints').innerHTML=jointMarkup(o.arm?.joints||[]);drawTactile($('#replay-tactile'),o.tactile,o.captured_monotonic_ns,true);
+    $('#replay-joints').innerHTML=jointMarkup(o.arm?.joints||[]);LingxiTactile.render($('#replay-tactile'),o.tactile,sample.tactile_quality,true);
     $('#replay-prev').disabled=replayIndex===0;$('#replay-next').disabled=replayIndex+1>=replayCount;
   }catch(e){$('#replay-source').textContent=String(e);$('#replay-joints').replaceChildren();$('#replay-tactile').replaceChildren();}
 }

@@ -16,6 +16,7 @@ from ..client import X2Client
 from ..models import ArmCommand, CameraName, HandCommand, Side
 from ..errors import X2Error
 from .recordings import RecordingLibrary
+from ..tactile_quality import review_tactile
 
 
 class RecordingRequest(BaseModel):
@@ -127,12 +128,14 @@ def create_app(client: X2Client | None = None) -> FastAPI:
             tactile = {side.value: asdict(value) for side, value in hardware.tactile_frames(0.2).items()}
         except X2Error as exc:
             tactile_error = str(exc)
+        reference_ns = time.monotonic_ns()
         return {
             "arm": asdict(arm),
             "hands": {side.value: asdict(value) for side, value in hands.items()},
             "tactile": tactile,
             "tactile_error": tactile_error,
-            "received_monotonic_ns": time.monotonic_ns(),
+            "received_monotonic_ns": reference_ns,
+            "tactile_quality": review_tactile(tactile, reference_ns),
             "source": "live",
         }
 
@@ -181,4 +184,3 @@ def create_app(client: X2Client | None = None) -> FastAPI:
     static = Path(__file__).with_name("static")
     app.mount("/", StaticFiles(directory=static, html=True), name="static")
     return app
-

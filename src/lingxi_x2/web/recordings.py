@@ -10,6 +10,7 @@ import uuid
 
 from ..recording import JsonlRecorder, observation_to_dict
 from ..replay import RecordingReader, inspect_recording
+from ..tactile_quality import review_tactile
 
 
 class RecordingLibrary:
@@ -100,7 +101,9 @@ class RecordingLibrary:
         for sample in reader:
             if sample.index < offset:
                 continue
-            samples.append({"index": sample.index, "observation": observation_to_dict(sample.observation, False),
+            observation = observation_to_dict(sample.observation, False)
+            samples.append({"index": sample.index, "observation": observation,
+                            "tactile_quality": review_tactile(observation['tactile'], observation['captured_monotonic_ns']),
                             "omitted_images": list(sample.omitted_images), "camera_metadata": sample.camera_metadata})
             if len(samples) >= limit:
                 break

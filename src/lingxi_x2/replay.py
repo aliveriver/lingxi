@@ -59,6 +59,15 @@ def decode_observation(payload: dict, index: int = 0, *, require_images: bool = 
     captured = payload["captured_monotonic_ns"]
     if type(captured) is not int or captured < 0:
         raise RecordingError("Invalid captured_monotonic_ns")
+    # Validate original raw types before Pydantic can coerce bool/string/float to int.
+    from .tactile_quality import validate_frame
+    if not isinstance(payload['tactile'], dict) or not set(payload['tactile']) <= {'left', 'right'}:
+        raise RecordingError('Invalid tactile mapping')
+    for side, frame in payload['tactile'].items():
+        try:
+            validate_frame(frame, side)
+        except ValueError as exc:
+            raise RecordingError(str(exc)) from exc
     # Keep source payloads untouched; omitted images must not become empty fake frames.
     data = dict(payload)
     cameras, omitted, camera_metadata = {}, [], {}
@@ -187,15 +196,30 @@ class RecordingReader:
 
 
 def inspect_recording(path: str | Path) -> dict:
+    from .tactile_quality import review_tactile
+    from dataclasses import asdict
     reader = RecordingReader(path)
     count, first, last, omitted = 0, None, None, set()
     tactile_peak, tactile_nonzero = 0, 0
+    quality_counts = {side: {k: 0 for k in ('fresh', 'stale', 'missing', 'invalid', 'time_error')}
+                      for side in ('left', 'right')}
+    repeated = dict.fromkeys(('left', 'right'), 0)
+    previous_tactile = {}
+    ceiling_cells = 0
     for sample in reader:
         stamp = sample.observation.captured_monotonic_ns
         if first is None: first = stamp
         last = stamp
         count += 1
         omitted.update(c.value for c in sample.omitted_images)
+        quality = review_tactile({s.value: asdict(f) for s, f in sample.observation.tactile.items()}, stamp)
+        for side, row in quality['sides'].items():
+            quality_counts[side][row['status']] += 1
+            ceiling_cells += row['raw_ceiling_cells'] or 0
+        for side, frame in sample.observation.tactile.items():
+            receipt = frame.timestamp.monotonic_ns
+            if previous_tactile.get(side) == receipt: repeated[side.value] += 1
+            previous_tactile[side] = receipt
         for frame in sample.observation.tactile.values():
             for surface in (frame.palm, frame.back_of_hand, *frame.fingertips.values()):
                 tactile_peak = max(tactile_peak, max(surface.values, default=0))
@@ -207,4 +231,7 @@ def inspect_recording(path: str | Path) -> dict:
             "duration_s": (last - first) / 1e9 if count > 1 else 0., "metadata": reader.metadata,
             "omitted_image_streams": sorted(omitted), "tactile_peak_raw_uint8": tactile_peak,
             "tactile_nonzero_cell_samples": tactile_nonzero,
+            "tactile_quality_counts": quality_counts, "tactile_raw_ceiling_cell_samples": ceiling_cells,
+            "tactile_repeated_receipt_samples": repeated,
+            "tactile_quality_note": "Age at original capture; missing is not zero. Repeated receipt is not a sensor-drop count; 255 is a raw byte ceiling, not calibrated saturation.",
             "motion_verified": False, "tactile_contact_verified": False}

@@ -20,25 +20,32 @@ from lingxi_x2.control_trace import ControlTrace
 from lingxi_x2.errors import SafetyInterlockError
 from lingxi_x2.gravity_capture import GravityCapture, TOPICS
 from lingxi_x2.gravity_diagnostic import (LimitedGravityGuard, limited_gravity_plan,
-    check_encoder_excursion, diagnostic_mode, RATE_HZ)
+    check_encoder_excursion, diagnostic_mode, RATE_HZ, diagnostic_protocol,
+    validate_model_plan, MODEL_SHA256, CALIBRATION_SHA256)
 from lingxi_x2.gravity_diagnostic import bounded_timing_window
 from lingxi_x2.models import ARM_JOINT_NAMES
 from lingxi_x2.publication import publish_points
 
 MODEL = Path("logs/official-model-audit/pc2-sdk/x2_ultra.urdf")
 CALIBRATION = Path("logs/official-model-audit/pc2-factory-calibration.yml")
-HASHES = {MODEL: "f84fcd22187d7f3d9730f36b06b39e49fb6a59cd8b1d26bcb5a817dfd300b40a",
-          CALIBRATION: "ce405931791f04ffdc14b6ac511e43e74912f0a86370ab327d20070d6c8dc0ef"}
+HASHES = {MODEL: MODEL_SHA256, CALIBRATION: CALIBRATION_SHA256}
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--confirm-hardware", action="store_true")
     parser.add_argument("--trace", type=Path, required=True)
     parser.add_argument("--bias-only", action="store_true", help="Ramp bias in/hold/out without the additional +0.01 rad move")
-    args = parser.parse_args()
+    parser.add_argument("--compensation", choices=("on", "off"), required=True,
+                        help="Explicitly select capped bias or matched zero-bias control; all guards remain active")
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    compensation_enabled = args.compensation == "on"
     reexec_with_ros_environment()
     from sensor_msgs.msg import Imu
     from aimdk_msgs.msg import JointStateArray
@@ -54,7 +61,10 @@ def main():
               "hardware_acceptance_complete": False, "model_and_mounting_verified": False,
               "joint_index": 0, "delta_rad": 0. if args.bias_only else .01, "bias_limit_rad": .002,
               "bias_only": args.bias_only, "cyclic_gc_paused_during_bounded_stream": True,
-              "total_command_excursion_limit_rad": .002 if args.bias_only else .012, "gravity_compensation_enabled": not args.dry_run,
+              "total_command_excursion_limit_rad": (.002 if args.bias_only else .012) if compensation_enabled else (0. if args.bias_only else .01),
+              "gravity_compensation_enabled": compensation_enabled and not args.dry_run,
+              "compensation_requested": compensation_enabled,
+              "diagnostic_protocol": diagnostic_protocol(bias_only=args.bias_only, compensation_enabled=compensation_enabled),
               "assumed_stiffness_nm_rad": 40., "additional_payload_mass_kg": 0.,
               "model_sha256": HASHES[MODEL], "calibration_sha256": HASHES[CALIBRATION],
               "physical_publish_count": 0, "events": [], "decisions": []}
@@ -104,7 +114,9 @@ def main():
                 if len(recent) < 50 or any(tuple(j["name"] for j in r["joints"]) != ARM_JOINT_NAMES
                         or any(abs(j["position"]-q)>1e-5 for j,q in zip(r["joints"],baseline)) for r in recent):
                     raise SafetyInterlockError("HAL baseline not complete and stationary")
-                plan = list(limited_gravity_plan(baseline, bias_only=args.bias_only))
+                plan = list(limited_gravity_plan(baseline, bias_only=args.bias_only,
+                                                compensation_enabled=compensation_enabled))
+                validate_model_plan(guard.model, plan)
                 guard.prepare_desired_poses(frame["desired_rad"] for frame in plan)
                 result["baseline_command_rad"] = list(baseline)
                 reference = tuple(j.position_rad for j in client.arm_state().joints)
@@ -165,7 +177,8 @@ def main():
                         result["physical_publish_count"] += 1
                     pending["receipt"] = receipt
                     result["decisions"].append(pending)
-                    record({"kind": "shadow_decision" if args.dry_run else "published_compensated_command", **pending})
+                    record({"kind": "shadow_decision" if args.dry_run else (
+                        "published_compensated_command" if compensation_enabled else "published_control_command"), **pending})
                     return receipt
 
                 if not args.dry_run:

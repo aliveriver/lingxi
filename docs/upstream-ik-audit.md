@@ -157,3 +157,15 @@ uv run x2 gravity-report \
    失败停止，不放大到 0.2 rad，不用切回站立后的反馈替代 URS 回位数据。
 5. 单轴通过后才逐步多轴、灵巧手接触与压力响应，最后实机 VLA/WAM。
    目前继续允许离线计算、mock、只读采集和回放。
+
+
+## 后续同日：匹配对照与发送目标限位补强
+
+再次只读检查本地参考副本，HEAD仍为 `2f6302ebf6f1b8a2c82c98b5c11ba248858944ea`，副本工作区干净；没有拉取新的上游版本或运行机器人入口。
+
+- [`fixed_compensation`](https://github.com/maine-cat/Agibot-X2-IK-upper-body-control/blob/2f6302ebf6f1b8a2c82c98b5c11ba248858944ea/source/x2ik/x2_compensation.py#L8) 明确是固定运行参数而非逐机标定：40、12°、pelvis。本机不采用12°上限。
+- [`_send_upper`](https://github.com/maine-cat/Agibot-X2-IK-upper-body-control/blob/2f6302ebf6f1b8a2c82c98b5c11ba248858944ea/source/x2ik/x2_sim_ros.py#L427) 明确提到零偏置作为纯位置基线；该思路用于本地650帧off/on匹配对照。上游同处对期望及最终目标执行clamp，本地选择在切模式前整段拒绝越界，避免裁剪改变实验条件。
+- [`goto_joint`](https://github.com/maine-cat/Agibot-X2-IK-upper-body-control/blob/2f6302ebf6f1b8a2c82c98b5c11ba248858944ea/source/x2ik/x2_sim_ros.py#L778) 从编码器构造起点、采用五次插值并比较期望误差；本地保留五次曲线及期望/发送目标分离，但继续固定HAL命令基线，不复用逐段编码器起点。
+- [`refresh_gravity`](https://github.com/maine-cat/Agibot-X2-IK-upper-body-control/blob/2f6302ebf6f1b8a2c82c98b5c11ba248858944ea/source/x2ik/x2_sim_ros.py#L339) 使用最新缓存更新估计；本地继续逐帧检查源/接收时钟、腰角完整性、六假设与站立故障，不因off组未施加偏置而跳过保护。
+
+本轮独立实现匹配对照及离线原始trace分析，没有复制上游代码、套用其实机默认参数、修改增益或启用HAL直发。新增发送目标URDF限位整段检查，修复专用脚本此前仅验证期望姿态模型限位的缺口。操作和判定见 [重力匹配对照](gravity-comparison.md)。本地全量330项通过；PC2未连接、未部署、未复测，完整实机目标仍未完成。
