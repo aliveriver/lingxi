@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from dataclasses import replace
 import threading
+import time
 
 import pytest
 
@@ -103,6 +104,12 @@ def stream_backend():
     backend._echo_subscription = None
     backend._last_command_echo = None
     backend._last_upper_command = None
+    backend._hal_arm_command = (backend._arm.timestamp, (0.,) * 14)
+    backend._hal_arm_error = None
+    backend._stream_feedback_error = None
+    backend._monitor_feedback = False
+    backend._feedback_stamps = {}
+    backend._hold_provenance = {}
     backend._subscriptions = []
     backend._types = {"UpperBodyCommandArray": _message, "McCommonState": object}
     backend._qos = None
@@ -117,7 +124,8 @@ def stream_backend():
         get_subscriptions_info_by_topic=lambda topic: [],
         get_fully_qualified_name=lambda: "/test",
         create_publisher=lambda *args: publisher,
-        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: SimpleNamespace(sec=1, nanosec=0))),
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(
+            nanoseconds=time.time_ns(), to_msg=lambda: SimpleNamespace(sec=1, nanosec=0))),
         create_timer=lambda period, callback: timers.append(callback) or callback,
         destroy_timer=timers.remove,
     )
@@ -212,3 +220,119 @@ def test_trace_and_echo_subscriptions_do_not_mask_external_subscriber_loss(strea
         SimpleNamespace(node_namespace="/", node_name="test") for _ in range(2)]
     backend._check_stream_graph()
     assert backend._graph_guard[1] == "upper-body subscriber lost"
+
+
+@pytest.mark.parametrize("subsystem", ["arm", "hand"])
+@pytest.mark.parametrize("side,index,value", [(Side.RIGHT, 3, -3.19638671875), (Side.LEFT, 4, -23.549616699)])
+def test_historical_hand_anomaly_never_creates_command_publisher(stream_backend, subsystem, side, index, value):
+    backend, messages, _, _ = stream_backend
+    hand = backend._hands[side]
+    joints = list(hand.joints)
+    joints[index] = replace(joints[index], position_rad=value)
+    backend._hands[side] = replace(hand, joints=tuple(joints))
+    report = backend.control_preflight(subsystem, require_enabled=False)
+    assert not report.ready
+    assert any(c.name == "feedback_validity" and not c.passed for c in report.checks)
+    with pytest.raises(SafetyInterlockError, match="Implausible"):
+        with backend.command_stream(subsystem):
+            pytest.fail("Anomalous feedback opened a command stream")
+    assert backend._upper_publisher is None and not messages
+
+
+@pytest.mark.parametrize("method", ["move_arm", "move_hand", "hold_upper_body"])
+def test_public_motion_methods_cannot_bypass_hand_anomaly(stream_backend, method):
+    from lingxi_x2.client import X2Client
+    from lingxi_x2.models import ArmCommand, HandCommand
+    backend, messages, _, _ = stream_backend
+    hand = backend._hands[Side.RIGHT]
+    backend._hands[Side.RIGHT] = replace(hand, joints=(replace(hand.joints[0], position_rad=-23.), *hand.joints[1:]))
+    client = X2Client(backend.config, backend=backend)
+    args = {"move_arm": [ArmCommand.from_positions((0.,)*14, .02)],
+            "move_hand": [HandCommand.from_positions("left", (.1,)*10, .02)], "hold_upper_body": [.02]}
+    with pytest.raises(SafetyInterlockError, match="Implausible"):
+        getattr(client, method)(*args[method], confirm_hardware=True)
+    assert not messages and backend._upper_publisher is None
+
+
+@pytest.mark.parametrize("damage", ["unknown_fault", "unknown_domain", "arm_order", "hand_order", "hand_type",
+                                   "source_stale", "source_future", "receive_future", "hand_anomaly"])
+def test_feedback_damage_blocks_next_frame(stream_backend, damage):
+    backend, messages, _, _ = stream_backend
+    with backend.command_stream("arm"):
+        send_arm(backend)
+        arm = backend._arm
+        if damage == "unknown_fault":
+            backend._arm = replace(arm, joints=(replace(arm.joints[0], fault_code=None), *arm.joints[1:]))
+        elif damage == "unknown_domain": backend._arm = replace(arm, domain_state=None)
+        elif damage == "arm_order": backend._arm = replace(arm, joints=arm.joints[::-1])
+        elif damage in ("hand_order", "hand_type", "hand_anomaly"):
+            hand = backend._hands[Side.RIGHT]
+            backend._hands[Side.RIGHT] = (replace(hand, joints=hand.joints[::-1]) if damage == "hand_order" else
+                replace(hand, hand_type=0) if damage == "hand_type" else
+                replace(hand, joints=(replace(hand.joints[0], position_rad=-3.2), *hand.joints[1:])))
+        else:
+            stamp = arm.timestamp
+            if damage == "source_stale": stamp = replace(stamp, sec=stamp.sec-10)
+            elif damage == "source_future": stamp = replace(stamp, sec=stamp.sec+10)
+            else: stamp = replace(stamp, monotonic_ns=time.monotonic_ns()+10**9)
+            backend._arm = replace(arm, timestamp=stamp)
+        with pytest.raises(SafetyInterlockError): send_arm(backend)
+    assert len(messages) == 1
+
+
+def test_missing_fault_field_remains_unknown():
+    joint = Ros2Backend._joint(SimpleNamespace(position=0.), "test")
+    assert joint.fault_code is None and joint.state is None
+
+
+def test_intervening_hand_fault_is_latched_even_after_good_callback(stream_backend):
+    backend, messages, _, _ = stream_backend
+    backend._extract_tactile = lambda *_: {}
+    backend._sample_seen = {}
+    def hand_message(fault):
+        now = time.time_ns()
+        return SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(sec=now//10**9, nanosec=now%10**9)),
+            left_hand_type=SimpleNamespace(value=1), right_hand_type=SimpleNamespace(value=1),
+            left_hands=[SimpleNamespace(name=j.name, position=j.position_rad, faultcode=fault) for j in backend._hands[Side.LEFT].joints],
+            right_hands=[SimpleNamespace(name=j.name, position=j.position_rad, faultcode=0) for j in backend._hands[Side.RIGHT].joints])
+    with backend.command_stream("arm"):
+        send_arm(backend)
+        backend._on_hand(hand_message(2))
+        backend._on_hand(hand_message(0))
+        assert all(j.fault_code == 0 for j in backend._hands[Side.LEFT].joints)
+        with pytest.raises(SafetyInterlockError, match="Latched"): send_arm(backend)
+    assert len(messages) == 1
+
+
+def test_hand_action_keeps_hal_arm_target_not_encoder_pose(stream_backend):
+    backend, messages, _, _ = stream_backend
+    hal = (.4, 0., 0., -1.2, 0., 0., 0.) * 2
+    backend._hal_arm_command = (backend._arm.timestamp, hal)
+    with backend.command_stream("hand"):
+        backend.publish_hand(Side.RIGHT, (.1,)*10)
+    assert messages[0].arm_pos == list(hal)
+    assert backend.stream_diagnostics()["hold_targets"]["arm_source"] == "fresh_hal_arm_command"
+
+
+def test_frozen_hand_targets_survive_small_feedback_quantization(stream_backend):
+    backend, messages, _, _ = stream_backend
+    hand = backend._hands[Side.RIGHT]
+    backend._hands[Side.RIGHT] = replace(hand, joints=tuple(replace(j, position_rad=.001) for j in hand.joints))
+    fixed = {side: (0.,)*10 for side in Side}
+    with backend.command_stream("arm", hand_targets=fixed):
+        fixed[Side.RIGHT] = (1.,)*10  # Caller mutation cannot alter the captured target.
+        send_arm(backend)
+    assert messages[0].hand_pos == [0.]*20
+
+
+@pytest.mark.parametrize("damage", ["missing", "stale", "reordered"])
+def test_invalid_hal_arm_baseline_blocks_hand_stream(stream_backend, damage):
+    backend, messages, _, _ = stream_backend
+    if damage == "missing": backend._hal_arm_command = None
+    elif damage == "stale":
+        backend._hal_arm_command = (replace(backend._arm.timestamp, sec=1), (0.,)*14)
+    else:
+        backend._on_hal_arm_command(SimpleNamespace(joints=[]))
+    with pytest.raises(SafetyInterlockError):
+        with backend.command_stream("hand"): pytest.fail("Invalid baseline opened stream")
+    assert not messages and backend._upper_publisher is None

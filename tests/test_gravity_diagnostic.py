@@ -318,3 +318,18 @@ def test_live_cli_requires_explicit_on_off_before_ros_initialization(monkeypatch
     assert exc.value.code == 2
     args = module.build_parser().parse_args(['--dry-run', '--compensation', 'off', '--trace', 'new.json'])
     assert args.compensation == 'off' and args.dry_run
+
+
+def test_bounded_timing_restores_python_thread_interval_even_on_failure():
+    import sys
+    from lingxi_x2.gravity_diagnostic import bounded_timing_window
+    original=sys.getswitchinterval()
+    try:
+        for before in (.005,.0005):
+            sys.setswitchinterval(before)
+            with pytest.raises(RuntimeError):
+                with bounded_timing_window():
+                    assert sys.getswitchinterval()==pytest.approx(min(before,.001))
+                    raise RuntimeError('stop')
+            assert sys.getswitchinterval()==pytest.approx(before)
+    finally:sys.setswitchinterval(original)

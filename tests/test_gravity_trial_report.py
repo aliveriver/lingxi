@@ -270,3 +270,69 @@ def test_matched_nominal_schedule_with_different_actual_timing_is_rejected(tmp_p
     report = compare_files(off, on)
     assert report['verdict'] == 'not_comparable'
     assert any('durations' in p for p in report['problems'])
+
+
+def test_new_session_cannot_pass_with_missing_preparation():
+    trace=synthetic();trace['result']['session_schema_version']=2
+    assert evaluate_trace(trace)['verdict']=='inconclusive'
+
+
+@pytest.mark.parametrize('gain,execution_code,expected',[(1.,0,0),(.134,0,3),(1.,2,2)])
+def test_gravity_session_exit_code_uses_encoder_review(gain,execution_code,expected):
+    import runpy
+    from pathlib import Path
+    session=runpy.run_path(str(Path(__file__).resolve().parents[1]/'scripts/gravity_baseline_session.py'))
+    trace=synthetic(gain=gain)
+    assert session['review_completed_session'](trace,execution_code)==expected
+    assert not trace['result']['acceptance']['hardware_acceptance_complete']
+
+
+def prepared_synthetic():
+    from test_gravity_preparation import evidence, batch, row, START
+    trace=synthetic(clock_offset=2_040_000_000)
+    r=trace['result'];e=evidence()
+    r['drive_trace'] = {'samples': {key: [
+        {'received_monotonic_ns': d['receipt']['monotonic_ns'],
+         'stamp_ns': d['receipt']['monotonic_ns'] + 100_000_000_000}
+        for d in r['decisions']] for key in ('udcu', 'joints')},
+        'dropped': {'udcu': 0, 'joints': 0}, 'error_count': 0, 'unavailable_reason': None}
+    r['events'][0]['monotonic_ns']=START+1_005_000_000
+    r.update(session_schema_version=2,preparation=e['preparation'],encoder_reference_rad=list(r['baseline_command_rad']))
+    p=r['preparation'];p['references']['arm_state']=list(r['baseline_command_rad'])
+    p['batches']=p['batches'][:-1]
+    for b in p['batches']:
+        for kind in ('arm_state','hal_arm'):
+            for j,q in zip(row(b,kind)['joints'],r['baseline_command_rad']):j['position']=q
+    for i,d in enumerate(r['decisions']):
+        b=batch(d['receipt']['monotonic_ns']);b['stage']='trajectory'
+        for kind,q in (('arm_state',[j['position'] for j in trace['samples']['arm_state'][2*i]['joints']]),
+                       ('hal_arm',d['command_rad'])):
+            for j,value in zip(row(b,kind)['joints'],q):j['position']=value
+        p['batches'].append(b)
+    return trace
+
+
+def test_full_new_trace_passes_only_with_replayable_preparation_and_per_send_checks():
+    trace=prepared_synthetic()
+    r=evaluate_trace(trace)
+    assert r['verdict']=='single_trial_pass_under_engineering_criteria',r['quality_checks']
+    assert r['preparation']['verified']
+    trace['result']['preparation']['batches'].pop()
+    assert evaluate_trace(trace)['verdict']=='inconclusive'
+
+
+@pytest.mark.parametrize('damage', ['missing', 'empty', 'dropped', 'error'])
+def test_new_trial_missing_drive_evidence_cannot_pass(damage):
+    trace = prepared_synthetic()
+    drive = trace['result']['drive_trace']
+    if damage == 'missing':
+        del trace['result']['drive_trace']
+    elif damage == 'empty':
+        drive['samples']['joints'] = []
+    elif damage == 'dropped':
+        drive['dropped']['udcu'] = 1
+    else:
+        drive['error_count'] = 1
+    report = evaluate_trace(trace)
+    assert report['verdict'] == 'inconclusive'
+    assert not next(c for c in report['quality_checks'] if c['name'] == 'raw_drive_evidence')['passed']

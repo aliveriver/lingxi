@@ -13,6 +13,8 @@ from PIL import Image as PillowImage
 
 from ..config import PlatformConfig
 from ..errors import BackendUnavailableError, CapabilityUnavailableError, DataTimeoutError, SafetyInterlockError
+from ..feedback_guard import require_fresh, validate_feedback, validate_joint_feedback
+from ..safety import validate_arm_target, validate_hand_target
 from ..models import (
     ARM_JOINT_NAMES,
     HAND_JOINT_SUFFIXES,
@@ -221,6 +223,12 @@ class Ros2Backend(Backend):
         self._echo_subscription: Any = None
         self._last_command_echo: dict[str, Any] | None = None
         self._last_upper_command: dict[str, Any] | None = None
+        self._hal_arm_command: tuple[Timestamp, tuple[float, ...]] | None = None
+        self._hal_arm_error: str | None = None
+        self._stream_feedback_error: str | None = None
+        self._monitor_feedback = False
+        self._feedback_stamps: dict[str, int] = {}
+        self._hold_provenance: dict[str, Any] = {}
         self._subscriptions: list[Any] = []
 
     def start(self) -> None:
@@ -241,6 +249,10 @@ class Ros2Backend(Backend):
                 self._qos,
             )
         )
+        self._subscriptions.append(self._node.create_subscription(
+            self._types["JointCommandArray"], "/aima/hal/joint/arm/command",
+            self._on_hal_arm_command, self._qos,
+        ))
         if "McCommonState" in self._types:
             self._subscriptions.append(
                 self._node.create_subscription(
@@ -296,14 +308,74 @@ class Ros2Backend(Backend):
 
     @staticmethod
     def _joint(item: Any, fallback: str) -> JointSample:
+        fault = getattr(item, "faultcode", getattr(item, "error_code", None))
+        state = getattr(item, "state", None)
         return JointSample(
             str(getattr(item, "name", "") or fallback),
             float(item.position),
             float(getattr(item, "velocity", 0.0)),
             float(getattr(item, "effort", 0.0)),
-            int(getattr(item, "faultcode", getattr(item, "error_code", 0))),
-            int(getattr(item, "state", 0)),
+            None if fault is None else int(fault),
+            None if state is None else int(state),
         )
+
+    def _on_hal_arm_command(self, message: Any) -> None:
+        try:
+            if tuple(j.name for j in message.joints) != ARM_JOINT_NAMES:
+                raise SafetyInterlockError("Incomplete/reordered HAL arm command baseline")
+            value = (self._stamp(message.header), validate_arm_target(tuple(j.position for j in message.joints)))
+            error = None
+        except (AttributeError, TypeError, ValueError, SafetyInterlockError) as exc:
+            value, error = None, str(exc)
+        with self._condition:
+            self._hal_arm_command, self._hal_arm_error = value, error
+            if error and self._monitor_feedback:
+                self._stream_feedback_error = self._stream_feedback_error or error
+            self._condition.notify_all()
+
+    def arm_command_baseline(self) -> tuple[float, ...]:
+        """Fresh HAL command, never a measured-pose replacement or settling proof."""
+        with self._condition:
+            value, error = self._hal_arm_command, self._hal_arm_error
+        if value is None or error:
+            raise SafetyInterlockError(f"No valid HAL arm command baseline: {error or 'missing'}")
+        stamp, positions = value
+        require_fresh(stamp, now_ns=time.monotonic_ns(), now_ros_ns=self._node.get_clock().now().nanoseconds,
+                      max_age_ns=round(self.config.ros.state_timeout_s * 1e9))
+        return positions
+
+    def _validate_feedback(self) -> None:
+        with self._condition:
+            arm, hands, mc = self._arm, dict(self._hands), self._mc_state
+            error = self._stream_feedback_error
+        if error:
+            raise SafetyInterlockError(f"Latched stream feedback failure: {error}")
+        validate_feedback(arm, hands, mc, now_ns=time.monotonic_ns(),
+                          now_ros_ns=self._node.get_clock().now().nanoseconds,
+                          max_age_ns=round(self.config.ros.state_timeout_s * 1e9),
+                          require_mc=self.config.control.authority == "upper_body_mc")
+
+    def _observe_stream_feedback(self, key: str, stamp: Timestamp) -> None:
+        """Called under the condition lock: a subsequent good sample cannot hide a fault."""
+        if not self._monitor_feedback:
+            return
+        source = stamp.sec * 10**9 + stamp.nanosec
+        previous = self._feedback_stamps.get(key)
+        self._feedback_stamps[key] = source
+        try:
+            if previous is not None and source <= previous:
+                raise SafetyInterlockError(f"Duplicate/backward {key} source timestamp")
+            validate_joint_feedback(self._arm, self._hands)
+            require_fresh(stamp, now_ns=time.monotonic_ns(), now_ros_ns=self._node.get_clock().now().nanoseconds,
+                          max_age_ns=round(self.config.ros.state_timeout_s * 1e9))
+            mc = self._mc_state
+            if self.config.control.authority == "upper_body_mc" and (
+                    mc is None or mc.action != UPPER_BODY_MODE or mc.action_status != MC_ACTION_RUNNING
+                    or mc.fsm_state != MC_FSM_STABLE or mc.body_state != MC_BODY_STAND
+                    or mc.motion_player_state != MC_MOTION_IDLE):
+                raise SafetyInterlockError("MC left stable standing upper-body mode")
+        except SafetyInterlockError as exc:
+            self._stream_feedback_error = self._stream_feedback_error or str(exc)
 
     def _on_arm(self, message: Any) -> None:
         joints = tuple(
@@ -314,6 +386,7 @@ class Ros2Backend(Backend):
         state = ArmState(self._stamp(message.header), joints, state_value)
         with self._condition:
             self._arm = state
+            self._observe_stream_feedback("arm", state.timestamp)
             self._sample_seen["arm"] = True
             self._condition.notify_all()
 
@@ -333,7 +406,7 @@ class Ros2Backend(Backend):
             int(getattr(input_source, "timeout", 0)),
             str(getattr(action_info, "action_desc", "")),
             self._value(getattr(action_info, "status", None)),
-            self._value(getattr(motion_status, "player_state", None)),
+            self._value(getattr(motion_status, "player_state", None), -1),
             self._value(getattr(motion_status, "control_area", None)),
             str(getattr(motion_status, "motion", "")),
             self._value(getattr(motion_status, "type", None)),
@@ -344,6 +417,7 @@ class Ros2Backend(Backend):
         )
         with self._condition:
             self._mc_state = state
+            self._observe_stream_feedback("mc", state.timestamp)
             self._sample_seen["mc"] = True
             self._condition.notify_all()
 
@@ -362,6 +436,7 @@ class Ros2Backend(Backend):
         tactile = self._extract_tactile(message, stamp)
         with self._condition:
             self._hands = states
+            self._observe_stream_feedback("hands", stamp)
             self._sample_seen["hand"] = True
             if tactile:
                 self._tactile = tactile
@@ -678,7 +753,7 @@ class Ros2Backend(Backend):
                 joint_faults = [
                     joint.name
                     for joint in (*arm.joints, *(joint for side in Side for joint in hands[side].joints))
-                    if joint.fault_code not in (None, 0)
+                    if joint.fault_code != 0
                 ]
                 checks.append(
                     PreflightCheck(
@@ -690,7 +765,7 @@ class Ros2Backend(Backend):
                 checks.append(
                     PreflightCheck(
                         "arm_domain_ready",
-                        arm.domain_state not in {1, 2, 3, 4},
+                        arm.domain_state == 0,
                         f"domain_state={arm.domain_state}",
                     )
                 )
@@ -703,6 +778,13 @@ class Ros2Backend(Backend):
                         else f"nonzero fault codes: {', '.join(joint_faults)}",
                     )
                 )
+                try:
+                    self._validate_feedback()
+                except SafetyInterlockError as exc:
+                    checks.append(PreflightCheck("feedback_validity", False, str(exc)))
+                else:
+                    checks.append(PreflightCheck("feedback_validity", True,
+                        "Named, fresh, fault-free feedback; O10 coarse envelope only, not calibration"))
             report = ControlPreflight(subsystem, UPPER_BODY_TOPIC, time.monotonic_ns(), tuple(checks), mc_state)
             failures = [check for check in checks if not check.passed]
             if require_enabled and failures:
@@ -725,6 +807,12 @@ class Ros2Backend(Backend):
             )
         )
         checks[1] = PreflightCheck("authority", True, "control.authority=hal_mc_stopped")
+        try:
+            self._validate_feedback()
+        except SafetyInterlockError as exc:
+            checks.append(PreflightCheck("feedback_validity", False, str(exc)))
+        else:
+            checks.append(PreflightCheck("feedback_validity", True, "Joint feedback checked"))
         report = ControlPreflight(subsystem, topic, time.monotonic_ns(), tuple(checks))
         failures = [check for check in checks if not check.passed]
         if require_enabled and failures:
@@ -753,11 +841,15 @@ class Ros2Backend(Backend):
         )
 
     @contextmanager
-    def command_stream(self, subsystem: str):
+    def command_stream(self, subsystem: str, *, hand_targets: Mapping[Side, tuple[float, ...]] | None = None):
         if not self._stream_lock.acquire(blocking=False):
             raise SafetyInterlockError("Another command stream is active")
         timer = None
         try:
+            with self._condition:
+                self._stream_feedback_error = None
+                self._feedback_stamps = {}
+                self._monitor_feedback = True
             self.control_preflight(subsystem)
             if self.config.control.authority == "upper_body_mc":
                 with self._condition:
@@ -770,8 +862,25 @@ class Ros2Backend(Backend):
                     )
                     self._subscriptions.append(self._echo_subscription)
                 arm, hands = self.arm_state(), self.hand_states()
-                self._held_arm = tuple(j.position_rad for j in arm.joints)
-                self._held_hands = {side: tuple(j.position_rad for j in hands[side].joints) for side in Side}
+                self._validate_feedback()
+                # Hand commands must not silently rebase the arm onto its tracking error.
+                self._held_arm = self.arm_command_baseline() if subsystem == "hand" else ()
+                measured = {side: validate_hand_target(tuple(j.position_rad for j in hands[side].joints)) for side in Side}
+                if hand_targets is not None:
+                    if set(hand_targets) != set(Side):
+                        raise SafetyInterlockError("Frozen hand targets require both hands")
+                    held = {side: validate_hand_target(hand_targets[side]) for side in Side}
+                    if any(abs(a-b) > .005 for side in Side for a,b in zip(held[side], measured[side])):
+                        raise SafetyInterlockError("Frozen hand targets differ from current feedback by more than 0.005 rad")
+                else:
+                    held = measured
+                self._held_hands = held
+                self._hold_provenance = {
+                    "arm_source": "fresh_hal_arm_command" if subsystem == "hand" else "trajectory",
+                    "hand_source": "explicit_frozen_targets" if hand_targets is not None else "validated_feedback_at_stream_entry",
+                    "arm_rad": list(self._held_arm), "hands_rad": {s.value: list(q) for s,q in held.items()},
+                    "hand_reference_calibrated": False,
+                }
                 if self._upper_publisher is None:
                     self._upper_publisher = self._node.create_publisher(
                         self._types["UpperBodyCommandArray"], UPPER_BODY_TOPIC, self._qos
@@ -789,6 +898,8 @@ class Ros2Backend(Backend):
         finally:
             self._stream_owner = None
             self._stream_subsystem = None
+            with self._condition:
+                self._monitor_feedback = False
             if timer is not None:
                 self._node.destroy_timer(timer)
             self._stream_lock.release()
@@ -819,6 +930,8 @@ class Ros2Backend(Backend):
             command, echo = self._last_upper_command, self._last_command_echo
         return {
             "last_command": command,
+            "hold_targets": dict(self._hold_provenance),
+            "stream_feedback_error": self._stream_feedback_error,
             "local_echo_enabled": self.config.control.command_echo,
             "last_local_echo": echo,
             "last_command_echo_matches": (echo is not None and echo["command"] == command)
@@ -831,6 +944,7 @@ class Ros2Backend(Backend):
             raise SafetyInterlockError("Publishing requires an active command_stream")
         if not self.config.control.enabled:
             raise SafetyInterlockError("Hardware writes are disabled in config")
+        self._validate_feedback()
         if self.config.control.authority != "upper_body_mc":
             # Preserve the existing HAL safety path; only MC streaming is optimized.
             self.control_preflight(subsystem)
@@ -848,14 +962,18 @@ class Ros2Backend(Backend):
                 or mc.fsm_state != MC_FSM_STABLE or mc.body_state != MC_BODY_STAND
                 or mc.motion_player_state != MC_MOTION_IDLE):
             raise SafetyInterlockError("MC left stable standing upper-body mode")
-        if (len(arm.joints) != 14 or arm.domain_state in {1, 2, 3, 4}
+        if (len(arm.joints) != 14 or arm.domain_state != 0
                 or any(len(hands[side].joints) != 10 or hands[side].hand_type != 1 for side in Side)):
             raise SafetyInterlockError("Invalid arm/hand feedback or domain state")
         joints = (*arm.joints, *(joint for side in Side for joint in hands[side].joints))
-        if any(j.fault_code not in (None, 0) or not math.isfinite(j.position_rad) for j in joints):
+        if any(j.fault_code != 0 or not math.isfinite(j.position_rad) for j in joints):
             raise SafetyInterlockError("Joint fault or non-finite stream feedback")
 
     def _publish_upper(self, arm: tuple[float, ...], hands: Mapping[Side, tuple[float, ...]]) -> dict[str, Any]:
+        arm = validate_arm_target(arm)
+        if set(hands) != set(Side):
+            raise SafetyInterlockError("Both hand targets are required")
+        hands = {side: validate_hand_target(hands[side]) for side in Side}
         assert self._node is not None
         message_type = self._types["UpperBodyCommandArray"]
         if self._upper_publisher is None:
@@ -890,6 +1008,7 @@ class Ros2Backend(Backend):
         damping: float,
     ) -> dict[str, Any] | None:
         self._check_stream_state("arm")
+        positions_rad = validate_arm_target(positions_rad)
         assert self._node is not None
         if self.config.control.authority == "upper_body_mc":
             return self._publish_upper(positions_rad, self._held_hands)
@@ -918,8 +1037,11 @@ class Ros2Backend(Backend):
 
     def publish_hand(self, side: Side, positions_rad: tuple[float, ...]) -> dict[str, Any] | None:
         self._check_stream_state("hand")
+        positions_rad = validate_hand_target(positions_rad)
         assert self._node is not None
         if self.config.control.authority == "upper_body_mc":
+            if any(abs(a-b) > 1e-5 for a,b in zip(self.arm_command_baseline(), self._held_arm)):
+                raise SafetyInterlockError("HAL arm targets changed during hand-only command stream")
             values = dict(self._held_hands)
             values[side] = positions_rad
             return self._publish_upper(self._held_arm, values)

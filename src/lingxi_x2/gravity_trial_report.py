@@ -11,11 +11,13 @@ from pathlib import Path
 from statistics import median
 
 from .acceptance_report import AcceptanceCriteria, _finite_vector, _standing
+from .gravity_preparation import review_preparation
 from .gravity import StaticArmModel
 from .gravity_diagnostic import (CALIBRATION_SHA256, MODEL_SHA256, LimitedGravityGuard,
                                  diagnostic_phases, diagnostic_protocol,
                                  limited_gravity_plan, validate_model_plan)
 from .errors import SafetyInterlockError
+from .drive_trace import review_drive_window
 from .models import ARM_JOINT_NAMES
 from .publication import summarize_frames
 from .replay import strict_json
@@ -90,6 +92,20 @@ def evaluate_trace(trace):
         by = {e['phase']: e for e in events}
         start, stop = by['baseline_hold']['monotonic_ns'], by['recovery_complete']['monotonic_ns']
         report.update(start_monotonic_ns=start, stop_monotonic_ns=stop)
+        report['drive_evidence'] = (review_drive_window(r['drive_trace'], start, stop)
+            if 'drive_trace' in r else {'raw_samples_available': False, 'drive_cause_identified': False,
+                                       'reason': 'Legacy trial has no synchronous raw drive trace'})
+        version = r.get('session_schema_version', 1)
+        check('session_schema', type(version) is int and version in (1, 2))
+        if version == 2 or 'preparation' in r:
+            check('raw_drive_evidence', report['drive_evidence']['raw_samples_available'])
+            report['preparation'] = review_preparation(r, start)
+            check('preparation_verified', report['preparation']['verified'])
+            check('no_upper_before_stable', not any(
+                by['before_mode']['monotonic_ns'] <= row['received_monotonic_ns'] < start
+                for row in trace['samples']['upper']))
+        else:
+            report['preparation'] = {'verified': False, 'reason': 'legacy trace lacks continuous preparation evidence'}
         phase_ends = {name: by[phases[i+1][0] if i+1 < len(phases) else 'recovery_complete']['monotonic_ns']
                       for i, (name, _) in enumerate(phases)}
         durations = {name: (phase_ends[name]-by[name]['monotonic_ns'])/1e9 for name, _ in phases}
@@ -287,6 +303,10 @@ def compare_files(control_path, treatment_path):
     for r, enabled in ((control, False), (treatment, True)):
         if r['protocol']['bias_only'] or r['protocol']['compensation_enabled'] is not enabled:
             problems.append('Need a full-motion off control followed by an on treatment input')
+    if control['preparation'] != treatment['preparation']:
+        # Timestamps naturally differ; policy and evidence generation must match.
+        if any(control['preparation'].get(k) != treatment['preparation'].get(k) for k in ('verified', 'policy')):
+            problems.append('Preparation policy or evidence generation differs')
     a, b = (dict(r['protocol']) for r in (control, treatment))
     a.pop('compensation_enabled'); b.pop('compensation_enabled')
     if a != b or any(control[k] != treatment[k] for k in ('model_sha256', 'calibration_sha256', 'criteria')):
